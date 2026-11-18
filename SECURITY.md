@@ -1,23 +1,21 @@
 # Security Policy
 
-Please do not report secrets, raw Antigravity probe payloads, cookies, CSRF tokens, emails, session IDs, transcript paths, or local absolute paths in public issues.
+Please do not report secrets, raw Antigravity payloads, cookies, tokens, emails, session IDs, transcript paths, or local absolute paths in public issues.
 
-For sensitive reports, use a private disclosure channel provided by the project maintainers.
+`agy-hud` (`0.2.0-passive`, forked from `franksde/agy-hud` @ `624e7183d2d84015ff3bef4a0c3e396cdb0e3283`) is **strictly passive**:
 
-`agy-hud statusline` renders only sanitized HUD fields from stdin plus local config/cache files. If the quota cache is stale or missing, it may start a detached background refresh that contacts only the local Antigravity loopback server. On Antigravity CLI 1.2.2+, which refuses that request, the refresh instead runs the official read-only `agy -p /usage` command: agy then talks to Google with your own sign-in, as it always does, and agy-hud itself makes no network request. Its output is parsed for quota buckets only, and its error text is never printed.
+- `agy-hud statusline` reads a single bounded (`1 MiB`) JSON object from `stdin`, sanitizes untrusted fields, formats via pure functions, writes HUD text to `stdout`, and exits.
+- It makes **zero network requests**, **zero subprocess calls**, and **zero filesystem reads or writes**.
+- It never invokes `agy -p /usage`, probes loopback servers, reads `.git/HEAD`, reads config/cache files, or accesses credential stores.
+- `agy-hud doctor` performs only a passive in-memory runtime check (Node version, OS locale/timezone, and terminal icon probe).
+- `hooks/status-line.cmd` resolves `node.exe` via `%~$PATH:i` (rejecting `%CD%\node.exe` even if `.` is on `PATH`) or standard system directories and executes only the local `dist/agy-hud.js` bundle.
 
-`hooks/status-line.sh` starts that renderer with `node`. When `node` is not on `PATH`, the hook reads directory names under the usual version-manager locations in your home directory and the Homebrew prefix, plus nvm's alias files and nodenv's `version` file, to find one. It uses shell builtins only, writes nothing, and runs no program other than the Node it finds. Inside the `agy -p /usage` run that a quota refresh starts (`AGY_HUD_NESTED=1`), it reads and discards its input and exits without starting Node. On Windows, `hooks/status-line.cmd` does the same for the nested run, and otherwise looks up `node.exe` in the `PATH` directories alone and starts it. It names every other program by its full path, so unlike a bare command in `cmd.exe` it does not run a program from the current directory, which is your workspace, unless `PATH` itself lists that directory as `.` or another relative entry.
+See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) and [docs/QUOTA_PAYLOAD_COMPATIBILITY.md](docs/QUOTA_PAYLOAD_COMPATIBILITY.md) for the full audit, threat model, and compatibility report.
 
-`agy-hud doctor` reads local files and runs one program, `agy plugin list --json`, to find the installed copy of the plugin. Neither is sent anywhere.
+## Optional Codex Companion
 
-## Local Files
+`dist/codex-hud.js` is a separate companion process. In terminal mode it starts `codex app-server --stdio` and asks Codex for account rate limits once per minute; the Windows desktop widget (`codex/widget.ps1`) reads only quota events from local Codex session files under `CODEX_HOME` or `~/.codex`. Neither accesses credentials, and neither is imported by `agy-hud statusline`.
 
-`agy-hud` writes local files under its cache directory (`$XDG_CACHE_HOME/agy-hud/`, or `$HOME/.cache/agy-hud/`):
+## Optional OpenCode TUI Plugin (opencode-hud)
 
-- `quota_cache.json` holds a masked email, the plan name, and per-model quota; after a `/usage` refresh it holds only the quota buckets (remaining fraction and reset time per window) and a timestamp.
-- `quota_cache.json.statusline.json` holds the current conversation id and agent state, used to debounce refreshes.
-- `quota_cache.json.server.json` is an optional discovery hint containing only a PID, loopback port, process start time/executable path and discovery timestamp. No CSRF token or credential is cached; reuse requires the same live `agy` process identity and a hint younger than five minutes.
-- `quota_cache.json.auth-rejected.json` records that the loopback server refused the probe for a CLI version, plus the `/usage` failure backoff. It holds a version string and timestamps only.
-- A transient `quota_cache.json.lock` coordinates background refreshes. It holds a random owner token.
-
-These files are not secrets in the credential sense — there are no tokens, cookies, or CSRF values — but they describe your account, activity and local machine. Since 0.1.8 the directory is created with mode `0700` and the data files with `0600`, so newly created files are not readable by other local accounts on a shared machine. Existing permissions are not changed automatically. Before 0.1.8 they inherited the default umask, typically leaving them world-readable at `0755`/`0644`.
+`opencode-hud/` is a separate OpenCode TUI plugin that runs only inside OpenCode TUI. It queries `client.experimental.usage.limits()` or `https://opencode.ai/zen/go/v1/usage` in memory using OpenCode's active credential without writing keys to disk, and is never imported by `dist/agy-hud.js`.

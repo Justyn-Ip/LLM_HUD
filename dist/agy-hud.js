@@ -150,28 +150,20 @@ var require_emoji_regex2 = __commonJS({
 // src/main.ts
 var main_exports = {};
 __export(main_exports, {
-  configPaths: () => configPaths,
-  doctorDepsFromEnv: () => doctorDepsFromEnv,
-  pluginConfigPaths: () => pluginConfigPaths,
-  quotaCacheNeedsRefresh: () => quotaCacheNeedsRefresh,
-  quotaCacheReadCandidates: () => quotaCacheReadCandidates,
-  quotaCacheWritePath: () => quotaCacheWritePath,
+  maxStdinBytes: () => maxStdinBytes,
+  parsePayloadObject: () => parsePayloadObject,
+  readStdinBounded: () => readStdinBounded,
   renderStatusline: () => renderStatusline,
   runCli: () => runCli,
-  sameFrameRefreshBudgetMs: () => sameFrameRefreshBudgetMs,
   stdinTimeoutMs: () => stdinTimeoutMs,
-  userConfigPath: () => userConfigPath,
   version: () => version
 });
 module.exports = __toCommonJS(main_exports);
-var import_node_fs6 = __toESM(require("node:fs"));
-var import_node_os2 = __toESM(require("node:os"));
-var import_node_path5 = __toESM(require("node:path"));
-var import_node_child_process3 = require("node:child_process");
-var import_node_crypto = require("node:crypto");
 
 // src/config.ts
-var import_node_fs = __toESM(require("node:fs"));
+var defaultStdinTimeoutMs = 1e3;
+var minStdinTimeoutMs = 50;
+var maxStdinTimeoutMs = 1e4;
 function defaultConfig() {
   return {
     showModel: true,
@@ -187,657 +179,118 @@ function defaultConfig() {
     showIcons: true,
     contextValue: "percent",
     usageValue: "remaining",
-    debug: false
+    locale: void 0,
+    timeZone: void 0,
+    stdinTimeoutMs: defaultStdinTimeoutMs
   };
 }
-function loadFromPaths(paths) {
-  for (const configPath of paths) {
-    let raw;
-    try {
-      raw = import_node_fs.default.readFileSync(configPath, "utf8");
-    } catch {
-      continue;
-    }
-    return parseConfig(raw);
+function isValidLocale(value) {
+  if (value === "" || value.length > 35 || !/^[A-Za-z0-9-]+$/.test(value)) {
+    return false;
   }
-  return defaultConfig();
-}
-function parseConfig(raw) {
   try {
-    return merge(defaultConfig(), JSON.parse(stripBom(raw)));
+    new Intl.DateTimeFormat(value);
+    return true;
   } catch {
-    return defaultConfig();
+    return false;
   }
 }
-function stripBom(text) {
-  return text.startsWith("\uFEFF") ? text.slice(1) : text;
+function isValidTimeZone(value) {
+  if (value === "" || value.length > 64 || !/^[A-Za-z0-9_/+.-]+$/.test(value)) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat(void 0, { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
 }
-function merge(base, patch) {
-  if (typeof patch.show_model === "boolean") base.showModel = patch.show_model;
-  if (typeof patch.show_progress_bar === "boolean") base.showProgressBar = patch.show_progress_bar;
-  if (typeof patch.multiline === "boolean") base.multiline = patch.multiline;
-  if (typeof patch.color === "boolean") base.color = patch.color;
-  if (typeof patch.show_git_branch === "boolean") base.showGitBranch = patch.show_git_branch;
-  if (typeof patch.show_cwd === "boolean") base.showCWD = patch.show_cwd;
-  if (typeof patch.show_agent_state === "boolean") base.showAgentState = patch.show_agent_state;
-  if (typeof patch.show_cost === "boolean") base.showCost = patch.show_cost;
-  if (typeof patch.show_title === "boolean") base.showTitle = patch.show_title;
-  if (typeof patch.show_mode === "boolean") base.showMode = patch.show_mode;
-  if (typeof patch.show_icons === "boolean") base.showIcons = patch.show_icons;
-  if (typeof patch.context_value === "string" && patch.context_value !== "") base.contextValue = patch.context_value;
-  if (typeof patch.usage_value === "string" && patch.usage_value !== "") base.usageValue = patch.usage_value;
-  if (typeof patch.debug === "boolean") base.debug = patch.debug;
-  return base;
+function parseCliConfig(args, base = defaultConfig()) {
+  const cfg = { ...base };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--color") cfg.color = true;
+    else if (arg === "--no-color") cfg.color = false;
+    else if (arg === "--icons") cfg.showIcons = true;
+    else if (arg === "--no-icons") cfg.showIcons = false;
+    else if (arg === "--bar") cfg.showProgressBar = true;
+    else if (arg === "--no-bar") cfg.showProgressBar = false;
+    else if (arg === "--multiline") cfg.multiline = true;
+    else if (arg === "--single-line") cfg.multiline = false;
+    else if (arg === "--no-git") cfg.showGitBranch = false;
+    else if (arg === "--no-cwd") cfg.showCWD = false;
+    else if (arg === "--no-state") cfg.showAgentState = false;
+    else if (arg === "--no-cost") cfg.showCost = false;
+    else if (arg === "--no-mode") cfg.showMode = false;
+    else if (arg === "--show-title") cfg.showTitle = true;
+    else if (arg === "--no-title") cfg.showTitle = false;
+    else if (arg.startsWith("--context-value=")) {
+      const v = arg.slice("--context-value=".length);
+      if (v === "percent" || v === "tokens" || v === "both") cfg.contextValue = v;
+      else return { config: cfg, error: "Invalid --context-value (expected percent, tokens, or both)." };
+    } else if (arg.startsWith("--usage-value=")) {
+      const v = arg.slice("--usage-value=".length);
+      if (v === "remaining" || v === "percent") cfg.usageValue = v;
+      else return { config: cfg, error: "Invalid --usage-value (expected remaining or percent)." };
+    } else if (arg.startsWith("--locale=")) {
+      const v = arg.slice("--locale=".length);
+      if (isValidLocale(v)) cfg.locale = v;
+      else return { config: cfg, error: "Invalid --locale value." };
+    } else if (arg.startsWith("--time-zone=")) {
+      const v = arg.slice("--time-zone=".length);
+      if (isValidTimeZone(v)) cfg.timeZone = v;
+      else return { config: cfg, error: "Invalid --time-zone value." };
+    } else if (arg.startsWith("--stdin-timeout-ms=")) {
+      const raw = Number(arg.slice("--stdin-timeout-ms=".length));
+      if (!Number.isInteger(raw) || raw < minStdinTimeoutMs || raw > maxStdinTimeoutMs) {
+        return { config: cfg, error: `Invalid --stdin-timeout-ms (expected integer ${minStdinTimeoutMs}..${maxStdinTimeoutMs}).` };
+      }
+      cfg.stdinTimeoutMs = raw;
+    } else {
+      return { config: cfg, error: "Unknown flag." };
+    }
+  }
+  return { config: cfg };
 }
 
-// src/quota.ts
-var import_node_fs2 = __toESM(require("node:fs"));
-function load(cachePath) {
-  let raw;
-  try {
-    raw = import_node_fs2.default.readFileSync(cachePath, "utf8");
-  } catch {
-    return [null, false];
-  }
-  try {
-    const cache = JSON.parse(raw);
-    if (cache.models === null || typeof cache.models !== "object") {
-      cache.models = {};
-    }
-    return [cache, true];
-  } catch {
-    return [null, false];
-  }
+// src/doctor.ts
+var iconProbe = [
+  { glyph: "\uEE9C", label: "model" },
+  { glyph: "\uF0A3", label: "plan" },
+  { glyph: "\uE725", label: "branch" },
+  { glyph: "\uF07C", label: "folder" }
+];
+function nodeMajor(nodeVersion) {
+  const match = nodeVersion.trim().match(/^v?(\d+)/);
+  return match ? Number(match[1]) : 0;
 }
-function matchModel(cache, model) {
-  if (!cache) {
-    return [null, false];
-  }
-  if (Object.prototype.hasOwnProperty.call(cache.models, model)) {
-    return [cache.models[model], true];
-  }
-  const needle = normalize(model);
-  for (const [label, quota] of Object.entries(cache.models)) {
-    const haystack = normalize(label);
-    if (haystack.includes(needle) || needle.includes(haystack)) {
-      return [quota, true];
-    }
-  }
-  return [null, false];
-}
-function usagePercent(quota) {
-  let remaining = quota.remainingFraction;
-  if (remaining < 0) remaining = 0;
-  if (remaining > 1) remaining = 1;
-  return Math.trunc((1 - remaining) * 100 + 0.5);
-}
-function normalize(input) {
-  let out = input.toLowerCase();
-  for (const old of ["gemini", "(", ")", "-", "_"]) {
-    out = out.split(old).join(" ");
-  }
-  return out.trim().split(/\s+/).filter(Boolean).join(" ");
-}
-
-// src/quotaProbe.ts
-var import_node_fs3 = __toESM(require("node:fs"));
-var import_node_http = __toESM(require("node:http"));
-var import_node_https = __toESM(require("node:https"));
-var import_node_path = __toESM(require("node:path"));
-var import_node_child_process = require("node:child_process");
-var loopbackRequestTimeoutMs = 1500;
-var discoveryCommandTimeoutMs = 1e3;
-var probeAuthRejected = /* @__PURE__ */ Symbol("agy-hud.probeAuthRejected");
-function parseLanguageServerInfo(psOutput) {
-  for (const line of psOutput.split(/\r?\n/)) {
-    if (!line.includes("language_server") || !line.includes("--csrf_token")) {
-      continue;
-    }
-    const parts = line.trim().split(/\s+/);
-    const pid = parts.length > 1 ? parts[1] : "";
-    const tokenMatch = line.match(/--csrf_token\s+([a-zA-Z0-9-]+)/);
-    if (pid !== "" && /^\d+$/.test(pid) && tokenMatch) {
-      return { pid, csrfToken: tokenMatch[1] };
-    }
-  }
-  return null;
-}
-function parseAgyServerInfos(psOutput) {
-  const infos = [];
-  for (const line of psOutput.split(/\r?\n/)) {
-    if (!/(^|\s)(?:\/\S+\/)?agy(\s|$)/.test(line)) {
-      continue;
-    }
-    const parts = line.trim().split(/\s+/);
-    const pid = parts.length > 1 ? parts[1] : "";
-    if (pid !== "" && /^\d+$/.test(pid)) {
-      infos.push({ pid, csrfToken: "", kind: "agy" });
-    }
-  }
-  return infos;
-}
-function parseListeningPorts(lsofOutput) {
-  const ports = /* @__PURE__ */ new Set();
-  for (const line of lsofOutput.split(/\r?\n/)) {
-    if (!line.includes("LISTEN")) {
-      continue;
-    }
-    const match = line.match(/(?:127\.0\.0\.1|localhost|\*|\[::1\]):(\d+)\b/);
-    if (match) {
-      ports.add(Number(match[1]));
-    }
-  }
-  return [...ports];
-}
-function buildQuotaCache(rawResponse, now) {
-  if (!isRecord(rawResponse)) {
-    return null;
-  }
-  const userStatus = asRecord(rawResponse.userStatus);
-  const email = typeof userStatus.email === "string" ? maskEmail(userStatus.email) : "masked@email.com";
-  const planStatus = asRecord(userStatus.planStatus);
-  const planInfo = asRecord(planStatus.planInfo);
-  const planName = typeof planInfo.planName === "string" ? planInfo.planName : "Free";
-  const cascade = asRecord(userStatus.cascadeModelConfigData);
-  const configs = Array.isArray(cascade.clientModelConfigs) ? cascade.clientModelConfigs : [];
-  const models = {};
-  for (const item of configs) {
-    const model = asRecord(item);
-    const label = typeof model.label === "string" ? model.label : "";
-    const quotaInfo2 = asRecord(model.quotaInfo);
-    if (label === "" || Object.keys(quotaInfo2).length === 0) {
-      continue;
-    }
-    const resetTime = typeof quotaInfo2.resetTime === "string" ? quotaInfo2.resetTime : "";
-    const remainingFraction = typeof quotaInfo2.remainingFraction === "number" ? quotaInfo2.remainingFraction : resetTime === "" ? 1 : 0;
-    models[label] = { remainingFraction, resetTime };
-  }
-  if (Object.keys(models).length === 0) {
-    return null;
-  }
-  const cache = {
-    timestamp: now.toISOString().replace(".000Z", "Z"),
-    email,
-    plan_name: planName,
-    models
-  };
-  const lines = ["=== QUOTA SUMMARY ===", `Plan: ${planName}`, `Cache Timestamp: ${cache.timestamp}`];
-  for (const [model, quota] of Object.entries(models)) {
-    const usedPct = Math.trunc((1 - quota.remainingFraction) * 100 + 0.5);
-    let line = `- ${model.padEnd(30, " ")} : Usage ${String(usedPct).padStart(3, " ")}%`;
-    if (usedPct > 0 && quota.resetTime !== "") {
-      line += ` | Reset ${quota.resetTime}`;
-    }
-    lines.push(line);
-  }
-  lines.push("=====================");
-  return { cache, summary: lines.join("\n") };
-}
-async function refreshQuota(cachePath, runtime = defaultRuntime(), signal) {
-  const aborted = { ok: false, message: "Quota refresh aborted." };
-  if (signal?.aborted) return aborted;
-  if ((runtime.platform ?? process.platform) === "win32") {
-    return {
-      ok: false,
-      authRejected: true,
-      message: "Loopback quota discovery needs ps and lsof, which Windows does not have, so quota comes from agy /usage."
-    };
-  }
-  const hint = loadServerHint(cachePath, runtime);
-  if (signal?.aborted) return aborted;
-  if (hint) {
-    const raw = await tryRequest(runtime, hint.port, "", signal);
-    if (signal?.aborted) return aborted;
-    const built = buildQuotaCache(raw, runtime.now());
-    if (built) return saveQuotaCache(cachePath, built, runtime);
-    saveServerHint(cachePath, null, runtime);
-  }
-  let psOutput;
-  try {
-    psOutput = runtime.ps();
-  } catch (error) {
-    return { ok: false, message: `Could not list running processes: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  const languageServer = parseLanguageServerInfo(psOutput);
-  const candidates = [...parseAgyServerInfos(psOutput), ...languageServer ? [languageServer] : []];
-  if (candidates.length === 0) {
-    return { ok: false, message: "No running language_server or agy quota server found." };
-  }
-  let sawPort = false;
-  let sawResponse = false;
-  let sawAuthRejection = false;
-  for (const info of candidates) {
-    if (signal?.aborted) return aborted;
-    const identity = info.kind === "agy" ? processIdentity(runtime, info.pid) : null;
-    let ports;
-    try {
-      ports = parseListeningPorts(runtime.lsof(info.pid));
-    } catch {
-      continue;
-    }
-    if (ports.length > 0) {
-      sawPort = true;
-    }
-    for (const port of ports) {
-      if (signal?.aborted) return aborted;
-      const rawResponse = await tryRequest(runtime, port, info.csrfToken, signal);
-      if (signal?.aborted) return aborted;
-      if (rawResponse === probeAuthRejected) {
-        sawAuthRejection = true;
-        continue;
-      }
-      if (rawResponse) sawResponse = true;
-      const built = buildQuotaCache(rawResponse, runtime.now());
-      if (built) {
-        const result = saveQuotaCache(cachePath, built, runtime);
-        if (identity) {
-          saveServerHint(cachePath, { pid: info.pid, port, identity, discoveredAt: runtime.now().toISOString() }, runtime);
-        }
-        return result;
-      }
-    }
-  }
-  if (!sawPort) {
-    return { ok: false, message: "No listening ports found on quota server." };
-  }
-  if (!sawResponse && sawAuthRejection) {
-    return {
-      ok: false,
-      authRejected: true,
-      message: "The quota server rejected GetUserStatus as unauthenticated (missing CSRF token). Newer Antigravity CLI releases require a token the status line does not receive, so the HUD shows the quota from the status-line payload only."
-    };
-  }
-  if (!sawResponse) {
-    return { ok: false, message: "Failed to query GetUserStatus from all identified ports." };
-  }
-  return { ok: false, message: "GetUserStatus returned malformed quota data." };
-}
-function saveQuotaCache(cachePath, built, runtime) {
-  runtime.mkdir(import_node_path.default.dirname(cachePath));
-  runtime.writeFile(cachePath, `${JSON.stringify(built.cache, null, 2)}
-`);
+function collectPassiveDoctorReport(version2) {
+  const resolved = new Intl.DateTimeFormat().resolvedOptions();
   return {
-    ok: true,
-    message: `Successfully cached processed quota data to ${cachePath}`,
-    cachePath,
-    summary: built.summary
+    version: version2,
+    passive: true,
+    nodeVersion: process.version,
+    nodeOk: nodeMajor(process.version) >= 18,
+    platform: process.platform,
+    locale: resolved.locale || "unknown",
+    timeZone: resolved.timeZone || "unknown",
+    defaults: defaultConfig(),
+    iconProbe: iconProbe.map((item) => `${item.glyph} ${item.label}`).join("   ")
   };
 }
-function loadServerHint(cachePath, runtime) {
-  try {
-    const raw = runtime.readFile?.(`${cachePath}.server.json`);
-    if (!raw || raw.length > 4096) return null;
-    const hint = JSON.parse(raw);
-    if (!hint || typeof hint.pid !== "string" || !/^[1-9]\d{0,9}$/.test(hint.pid) || Number(hint.pid) > 2147483647 || !Number.isInteger(hint.port) || hint.port < 1 || hint.port > 65535 || typeof hint.identity !== "string" || hint.identity === "" || typeof hint.discoveredAt !== "string") return null;
-    const age = runtime.now().getTime() - Date.parse(hint.discoveredAt);
-    if (!Number.isFinite(age) || age < 0 || age >= 5 * 60 * 1e3) return null;
-    return processIdentity(runtime, hint.pid) === hint.identity ? hint : null;
-  } catch {
-    return null;
-  }
-}
-function processIdentity(runtime, pid) {
-  try {
-    return runtime.processIdentity?.(pid) || null;
-  } catch {
-    return null;
-  }
-}
-function saveServerHint(cachePath, hint, runtime) {
-  try {
-    runtime.writeFile(`${cachePath}.server.json`, `${JSON.stringify(hint)}
-`);
-  } catch {
-  }
-}
-async function tryRequest(runtime, port, csrfToken, signal) {
-  try {
-    return await runtime.request(port, csrfToken, signal);
-  } catch {
-    return null;
-  }
-}
-function defaultRuntime() {
-  return {
-    ps: () => (0, import_node_child_process.execFileSync)("ps", ["aux"], { encoding: "utf8", timeout: discoveryCommandTimeoutMs }),
-    lsof: (pid) => (0, import_node_child_process.execFileSync)("lsof", ["-nP", "-iTCP", "-a", "-p", pid], { encoding: "utf8", timeout: discoveryCommandTimeoutMs }),
-    request: queryLanguageServer,
-    now: () => /* @__PURE__ */ new Date(),
-    readFile: (filePath) => import_node_fs3.default.readFileSync(filePath, "utf8"),
-    processIdentity: (pid) => {
-      const identity = (0, import_node_child_process.execFileSync)("ps", ["-p", pid, "-o", "lstart=", "-o", "comm="], {
-        encoding: "utf8",
-        timeout: discoveryCommandTimeoutMs,
-        env: { ...process.env, LC_ALL: "C" }
-      }).trim();
-      const match = identity.match(/^\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+(.+)$/);
-      return match && import_node_path.default.basename(match[1]) === "agy" ? identity : null;
-    },
-    // The cache carries a masked email, plan name, and per-model quota, so keep it private instead
-    // of leaving it world-readable under the default umask.
-    writeFile: (filePath, data) => import_node_fs3.default.writeFileSync(filePath, data, { encoding: "utf8", mode: 384 }),
-    mkdir: (dirPath) => import_node_fs3.default.mkdirSync(dirPath, { recursive: true, mode: 448 })
-  };
-}
-async function queryLanguageServer(port, csrfToken, signal, timeoutMs = loopbackRequestTimeoutMs) {
-  if (signal?.aborted) return null;
-  const endpoint = `/exa.language_server_pb.LanguageServerService/GetUserStatus`;
-  const headers = {
-    "Content-Type": "application/json",
-    "Connect-Protocol-Version": "1"
-  };
-  if (csrfToken !== "") {
-    headers["X-Codeium-Csrf-Token"] = csrfToken;
-  }
-  const httpsResult = await requestJson(import_node_https.default, {
-    protocol: "https:",
-    hostname: "127.0.0.1",
-    port,
-    path: endpoint,
-    method: "POST",
-    headers,
-    rejectUnauthorized: false,
-    signal
-  }, timeoutMs);
-  if (signal?.aborted) return null;
-  if (httpsResult !== null) {
-    return httpsResult;
-  }
-  return requestJson(import_node_http.default, {
-    protocol: "http:",
-    hostname: "127.0.0.1",
-    port,
-    path: endpoint,
-    method: "POST",
-    headers,
-    signal
-  }, timeoutMs);
-}
-function requestJson(mod, options, timeoutMs) {
-  return new Promise((outerResolve) => {
-    let timer;
-    const resolve = (value) => {
-      clearTimeout(timer);
-      outerResolve(value);
-    };
-    const req = mod.request(options, (res) => {
-      const chunks = [];
-      res.on("close", () => {
-        if (!res.complete) resolve(null);
-      });
-      res.on("error", () => resolve(null));
-      res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      res.on("end", () => {
-        if (res.statusCode === 401) {
-          resolve(probeAuthRejected);
-          return;
-        }
-        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          resolve(null);
-          return;
-        }
-        try {
-          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        } catch {
-          resolve(null);
-        }
-      });
-    });
-    timer = setTimeout(() => {
-      req.destroy();
-      resolve(null);
-    }, timeoutMs);
-    req.on("error", () => resolve(null));
-    req.write("{}");
-    req.end();
-  });
-}
-function maskEmail(email) {
-  const at = email.indexOf("@");
-  if (at < 0) {
-    return "masked@email.com";
-  }
-  return `${email.slice(0, 3)}***${email.slice(at)}`;
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function asRecord(value) {
-  return isRecord(value) ? value : {};
-}
-
-// src/usageCommand.ts
-var import_node_fs4 = __toESM(require("node:fs"));
-var import_node_os = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
-var import_node_child_process2 = require("node:child_process");
-var usageArgs = ["-p", "/usage", "--output-format", "json", "--print-timeout", "30s"];
-async function queryUsage(runner = runAgy) {
-  const result = await runner(usageArgs, { ...process.env, AGY_HUD_NESTED: "1", AGY_CLI_DISABLE_AUTO_UPDATE: "true" });
-  if (result.error !== void 0) {
-    return { ok: false, message: "agy /usage failed: could not start agy." };
-  }
-  if (result.timedOut) {
-    return { ok: false, message: "agy /usage failed: timed out." };
-  }
-  if (result.code !== 0) {
-    return { ok: false, message: `agy /usage failed: exit ${result.code ?? "signal"}.` };
-  }
-  const quota = parseUsageOutput(result.stdout);
-  if (quota === null) {
-    return { ok: false, message: "agy /usage failed: unreadable output." };
-  }
-  return { ok: true, quota };
-}
-function parseUsageOutput(stdout) {
-  let parsed;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return null;
-  }
-  const groups = record(record(record(parsed).command).data).groups;
-  if (!Array.isArray(groups)) {
-    return null;
-  }
-  const quota = {};
-  for (const group of groups) {
-    const buckets = record(group).buckets;
-    if (!Array.isArray(buckets)) continue;
-    for (const raw of buckets) {
-      const bucket = record(raw);
-      const id = bucket.id;
-      const fraction = bucket.remaining_fraction;
-      const reset = bucket.reset_time;
-      if (typeof id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,39}$/.test(id)) continue;
-      if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) continue;
-      if (typeof reset !== "string" || !Number.isFinite(Date.parse(reset))) continue;
-      quota[id] = { remaining_fraction: fraction, reset_time: reset };
-    }
-  }
-  return Object.keys(quota).length > 0 ? quota : null;
-}
-var scratchPrefix = "agy-hud-usage-";
-var staleScratchMs = 60 * 60 * 1e3;
-function runAgy(args, env, options = {}) {
-  const { command = "agy", timeoutMs = 45 * 1e3, maxBytes = 1024 * 1024, platform = process.platform } = options;
-  return new Promise((resolve) => {
-    let scratch;
-    try {
-      sweepStaleScratch(import_node_os.default.tmpdir());
-      scratch = import_node_fs4.default.mkdtempSync(import_node_path2.default.join(import_node_os.default.tmpdir(), scratchPrefix));
-    } catch (error) {
-      resolve({ code: null, stdout: "", timedOut: false, error: String(error) });
-      return;
-    }
-    const chunks = [];
-    let size = 0;
-    let timedOut = false;
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.stdout.destroy();
-      try {
-        import_node_fs4.default.rmSync(scratch, { recursive: true, force: true });
-      } catch {
-      }
-      resolve(result);
-    };
-    const detached = platform !== "win32";
-    const child = (0, import_node_child_process2.spawn)(command, args, { cwd: scratch, env, stdio: ["ignore", "pipe", "ignore"], detached, windowsHide: true });
-    let treeKillStarted = false;
-    const killGroup = () => {
-      if (platform === "win32") {
-        if (treeKillStarted) return;
-        treeKillStarted = true;
-        killWindowsTree(child);
-        return;
-      }
-      try {
-        if (child.pid !== void 0) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killGroup();
-    }, timeoutMs);
-    child.stdout.on("data", (chunk) => {
-      if (size + chunk.length > maxBytes) {
-        chunks.push(chunk.subarray(0, maxBytes - size));
-        size = maxBytes;
-        killGroup();
-        return;
-      }
-      chunks.push(chunk);
-      size += chunk.length;
-    });
-    child.on("error", (error) => finish({ code: null, stdout: "", timedOut: false, error: String(error) }));
-    child.on("close", (code) => finish({ code, stdout: Buffer.concat(chunks).toString("utf8"), timedOut }));
-    child.on("exit", (code) => {
-      setTimeout(() => {
-        if (settled) return;
-        killGroup();
-        finish({ code, stdout: Buffer.concat(chunks).toString("utf8"), timedOut });
-      }, 500).unref();
-    });
-  });
-}
-function record(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-function killWindowsTree(child) {
-  if (child.pid === void 0 || child.exitCode !== null || child.signalCode !== null) return;
-  const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows";
-  const taskkill = import_node_path2.default.win32.join(systemRoot, "System32", "taskkill.exe");
-  let ended = false;
-  try {
-    const result = (0, import_node_child_process2.spawnSync)(taskkill, ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true, timeout: 5e3 });
-    ended = result.error === void 0 && result.status === 0;
-  } catch {
-  }
-  if (!ended) child.kill("SIGKILL");
-}
-function sweepStaleScratch(root, now = Date.now()) {
-  let names;
-  try {
-    names = import_node_fs4.default.readdirSync(root);
-  } catch {
-    return;
-  }
-  for (const name of names) {
-    if (!name.startsWith(scratchPrefix)) continue;
-    const dir = import_node_path2.default.join(root, name);
-    try {
-      const stat = import_node_fs4.default.lstatSync(dir);
-      if (!stat.isDirectory() || now - stat.mtimeMs < staleScratchMs) continue;
-      import_node_fs4.default.rmSync(dir, { recursive: true, force: true });
-    } catch {
-    }
-  }
-}
-
-// src/gitinfo.ts
-var import_node_fs5 = __toESM(require("node:fs"));
-var import_node_path3 = __toESM(require("node:path"));
-function branch(cwd) {
-  if (cwd === "") {
-    return "";
-  }
-  let dir;
-  try {
-    dir = import_node_path3.default.resolve(cwd);
-  } catch {
-    dir = cwd;
-  }
-  for (let i = 0; i < 8; i++) {
-    const raw = readHEAD(dir);
-    if (raw !== null) {
-      return parseHEAD(raw.trim());
-    }
-    const parent = import_node_path3.default.dirname(dir);
-    if (parent === dir) {
-      break;
-    }
-    dir = parent;
-  }
-  return "";
-}
-function readHEAD(dir) {
-  const gitPath = import_node_path3.default.join(dir, ".git");
-  let stat;
-  try {
-    stat = import_node_fs5.default.statSync(gitPath);
-  } catch {
-    return null;
-  }
-  if (stat.isDirectory()) {
-    try {
-      return import_node_fs5.default.readFileSync(import_node_path3.default.join(gitPath, "HEAD"), "utf8");
-    } catch {
-      return null;
-    }
-  }
-  let raw;
-  try {
-    raw = import_node_fs5.default.readFileSync(gitPath, "utf8");
-  } catch {
-    return null;
-  }
-  let gitDir = parseGitDirFile(raw.trim());
-  if (gitDir === "") {
-    return null;
-  }
-  if (!import_node_path3.default.isAbsolute(gitDir)) {
-    gitDir = import_node_path3.default.join(dir, gitDir);
-  }
-  try {
-    return import_node_fs5.default.readFileSync(import_node_path3.default.join(gitDir, "HEAD"), "utf8");
-  } catch {
-    return null;
-  }
-}
-function parseGitDirFile(raw) {
-  if (!raw.startsWith("gitdir:")) {
-    return "";
-  }
-  return raw.slice("gitdir:".length).trim();
-}
-function parseHEAD(head) {
-  if (head.startsWith("ref:")) {
-    const ref = head.slice("ref:".length).trim();
-    if (ref.startsWith("refs/heads/")) {
-      return ref.slice("refs/heads/".length);
-    }
-    return import_node_path3.default.basename(ref);
-  }
-  if (head.length > 7) {
-    return head.slice(0, 7);
-  }
-  return head;
+function formatPassiveDoctorReport(report) {
+  const lines = [
+    `agy-hud ${report.version} (strictly passive mode)`,
+    `node      ${report.nodeVersion} (${report.nodeOk ? "ok" : "Node 18+ required"})`,
+    `platform  ${report.platform}`,
+    `locale    ${report.locale}`,
+    `timezone  ${report.timeZone}`,
+    `probe     ${report.iconProbe}`,
+    `note      If the probe shows boxes instead of icons, pass --no-icons or install a Nerd Font.`
+  ];
+  return `${lines.join("\n")}
+`;
 }
 
 // src/ansi.ts
@@ -854,6 +307,7 @@ function visibleLen(input) {
   return (0, import_string_width.default)(text);
 }
 function truncateColumns(input, width) {
+  if (width <= 0) return "";
   let result = "";
   let columns = 0;
   for (const { segment } of graphemes.segment(strip(input))) {
@@ -864,9 +318,273 @@ function truncateColumns(input, width) {
   }
   return result;
 }
+function sanitizePlainText(raw, maxCols) {
+  if (typeof raw !== "string") return "";
+  const stripped = (0, import_strip_ansi.default)(raw).replace(new RegExp("\\p{Cc}", "gu"), " ").replace(new RegExp("(?![\\u200C\\u200D\\u{E0020}-\\u{E007F}])\\p{Cf}", "gu"), "").trim().split(/\s+/).filter(Boolean).join(" ");
+  if (stripped === "" || maxCols <= 0) return "";
+  if (visibleLen(stripped) <= maxCols) return stripped;
+  if (maxCols === 1) return truncateColumns(stripped, 1);
+  return `${truncateColumns(stripped, maxCols - 1)}\u2026`;
+}
+
+// src/quota.ts
+var maxBucketIdColumns = 32;
+var clockSkewToleranceSeconds = 120;
+var isoTzPattern = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)$/i;
+var knownBucketMeta = /* @__PURE__ */ new Map([
+  ["gemini-5h", { groupId: "gemini", groupLabel: "Gemini", windowLabel: "5h", label: "Gemini 5h" }],
+  ["gemini-weekly", { groupId: "gemini", groupLabel: "Gemini", windowLabel: "Weekly", label: "Gemini Weekly" }],
+  ["gemini-argon-wtu-5h", { groupId: "argon", groupLabel: "Argon", windowLabel: "5h", label: "Argon 5h" }],
+  ["argon-5h", { groupId: "argon", groupLabel: "Argon", windowLabel: "5h", label: "Argon 5h" }],
+  ["gemini-argon-wtu-weekly", { groupId: "argon", groupLabel: "Argon", windowLabel: "Weekly", label: "Argon Weekly" }],
+  ["3p-5h", { groupId: "3p", groupLabel: "Claude/GPT", windowLabel: "5h", label: "Claude/GPT 5h" }],
+  ["3p-weekly", { groupId: "3p", groupLabel: "Claude/GPT", windowLabel: "Weekly", label: "Claude/GPT Weekly" }]
+]);
+var knownGroupOrder = ["gemini", "argon", "3p"];
+function resolveBucketMeta(key) {
+  const safeId = sanitizePlainText(key, maxBucketIdColumns);
+  if (safeId === "" || safeId === "__proto__" || safeId === "constructor" || safeId === "prototype") {
+    return null;
+  }
+  const known = knownBucketMeta.get(key);
+  if (known) {
+    return known;
+  }
+  const suffixMatch = safeId.match(/^(.+?)-(5h|weekly)$/i);
+  if (suffixMatch) {
+    const prefix = sanitizePlainText(suffixMatch[1], maxBucketIdColumns);
+    if (prefix !== "") {
+      const windowLabel = suffixMatch[2].toLowerCase() === "5h" ? "5h" : "Weekly";
+      return {
+        groupId: `custom:${prefix.toLowerCase()}`,
+        groupLabel: prefix,
+        windowLabel,
+        label: sanitizePlainText(`${prefix} ${windowLabel}`, maxBucketIdColumns)
+      };
+    }
+  }
+  return {
+    groupId: `custom:${safeId}`,
+    groupLabel: safeId,
+    windowLabel: "",
+    label: safeId
+  };
+}
+function windowSortRank(windowLabel) {
+  if (windowLabel === "5h") return 0;
+  if (windowLabel === "Weekly") return 1;
+  return 2;
+}
+function parseTimezoneAwareTimestamp(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const match = trimmed.match(isoTzPattern);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = match[6] !== void 0 ? Number(match[6]) : 0;
+  const fracRaw = match[7] ?? "";
+  const tzRaw = match[8];
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+    return null;
+  }
+  const baseUtc = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  const check = new Date(baseUtc);
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day || check.getUTCHours() !== hour || check.getUTCMinutes() !== minute || check.getUTCSeconds() !== second) {
+    return null;
+  }
+  let offsetMinutes = 0;
+  if (tzRaw.toUpperCase() !== "Z") {
+    const sign = tzRaw[0] === "-" ? -1 : 1;
+    const digits = tzRaw.slice(1).replace(":", "");
+    const tzHours = Number(digits.slice(0, 2));
+    const tzMinutes = Number(digits.slice(2, 4));
+    offsetMinutes = sign * (tzHours * 60 + tzMinutes);
+  }
+  const ms = fracRaw === "" ? 0 : Math.trunc(Number(`0.${fracRaw.slice(0, 3)}`) * 1e3);
+  const epochMs = baseUtc - offsetMinutes * 6e4 + ms;
+  return Number.isFinite(epochMs) ? new Date(epochMs) : null;
+}
+function formatResetCountdown(diffMs) {
+  if (!Number.isFinite(diffMs) || diffMs <= 0) {
+    return "";
+  }
+  if (diffMs < 6e4) {
+    return "<1m";
+  }
+  let totalMinutes = Math.ceil(diffMs / 6e4);
+  const days = Math.trunc(totalMinutes / (24 * 60));
+  totalMinutes -= days * 24 * 60;
+  const hours = Math.trunc(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) {
+    return `${days}d ${hours}h ${pad2(minutes)}m`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${pad2(minutes)}m`;
+  }
+  return `${minutes}m`;
+}
+function formatAbsoluteResetTime(date, opts = {}) {
+  if (Number.isNaN(date.getTime())) return "";
+  const formatOpts = {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  };
+  if (opts.timeZone) {
+    formatOpts.timeZone = opts.timeZone;
+  }
+  const formatter = new Intl.DateTimeFormat(opts.locale || void 0, formatOpts);
+  const parts = formatter.formatToParts(date);
+  const day = parts.find((p) => p.type === "day")?.value ?? "";
+  const month = parts.find((p) => p.type === "month")?.value ?? "";
+  const year = parts.find((p) => p.type === "year")?.value ?? "";
+  const isTimePart = (type) => type === "hour" || type === "minute" || type === "dayPeriod";
+  const firstTimeIdx = parts.findIndex((p) => isTimePart(p.type));
+  let lastTimeIdx = -1;
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    if (isTimePart(parts[i].type)) {
+      lastTimeIdx = i;
+      break;
+    }
+  }
+  const timeStr = firstTimeIdx !== -1 && lastTimeIdx >= firstTimeIdx ? parts.slice(firstTimeIdx, lastTimeIdx + 1).map((p) => p.value).join("").trim() : "";
+  let formatted;
+  if (day !== "" && month !== "" && year !== "" && timeStr !== "") {
+    const dateStr = opts.compact ? `${day}-${month}` : `${day}-${month}-${year}`;
+    formatted = `${dateStr} ${timeStr}`;
+  } else {
+    formatted = formatter.format(date);
+  }
+  formatted = formatted.replace(/[\u00A0\u202F]/g, " ");
+  if (opts.estimated) {
+    return opts.compact ? `~${formatted}` : `~${formatted} (estimated)`;
+  }
+  return formatted;
+}
+function normalizeQuota(rawQuota, _modelDisplay, now = /* @__PURE__ */ new Date(), timeOpts = {}) {
+  if (!rawQuota || typeof rawQuota !== "object" || Array.isArray(rawQuota)) {
+    return { hasQuota: false, buckets: [], groups: [] };
+  }
+  const record = rawQuota;
+  const groupMap = /* @__PURE__ */ new Map();
+  for (const key of Object.keys(record)) {
+    const meta = resolveBucketMeta(key);
+    if (!meta) continue;
+    const safeId = sanitizePlainText(key, maxBucketIdColumns);
+    const rawBucket = record[key];
+    if (!rawBucket || typeof rawBucket !== "object" || Array.isArray(rawBucket)) {
+      continue;
+    }
+    const bucket = rawBucket;
+    const fraction = bucket.remaining_fraction;
+    if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+      continue;
+    }
+    const remainingPct = Math.round(100 * fraction);
+    const usedPct = 100 - remainingPct;
+    const absReset = parseTimezoneAwareTimestamp(bucket.reset_time);
+    const relSeconds = typeof bucket.reset_in_seconds === "number" && Number.isFinite(bucket.reset_in_seconds) && bucket.reset_in_seconds >= 0 ? bucket.reset_in_seconds : null;
+    let resetAt = null;
+    let resetEstimated = false;
+    let clockSkewDetected = false;
+    if (absReset !== null) {
+      resetAt = absReset;
+      if (relSeconds !== null) {
+        const expectedMs = now.getTime() + relSeconds * 1e3;
+        if (Math.abs(absReset.getTime() - expectedMs) > clockSkewToleranceSeconds * 1e3) {
+          clockSkewDetected = true;
+        }
+      }
+    } else if (relSeconds !== null) {
+      resetAt = new Date(now.getTime() + relSeconds * 1e3);
+      resetEstimated = true;
+    }
+    let resetPastDue = false;
+    let countdownText = "";
+    let absoluteText = "";
+    let shortAbsoluteText = "";
+    if (resetAt !== null) {
+      const diffMs = resetAt.getTime() - now.getTime();
+      if (diffMs <= 0) {
+        resetPastDue = true;
+        absoluteText = "Reset due / awaiting update";
+        shortAbsoluteText = "Reset due";
+      } else {
+        countdownText = formatResetCountdown(diffMs);
+        absoluteText = formatAbsoluteResetTime(resetAt, {
+          locale: timeOpts.locale,
+          timeZone: timeOpts.timeZone,
+          compact: false,
+          estimated: resetEstimated
+        });
+        shortAbsoluteText = formatAbsoluteResetTime(resetAt, {
+          locale: timeOpts.locale,
+          timeZone: timeOpts.timeZone,
+          compact: true,
+          estimated: resetEstimated
+        });
+      }
+    }
+    const normalizedBucket = {
+      id: safeId,
+      label: meta.label,
+      groupId: meta.groupId,
+      groupLabel: meta.groupLabel,
+      windowLabel: meta.windowLabel,
+      remainingPct,
+      usedPct,
+      resetAt,
+      resetEstimated,
+      resetPastDue,
+      countdownText,
+      absoluteText,
+      shortAbsoluteText,
+      clockSkewDetected
+    };
+    let group = groupMap.get(meta.groupId);
+    if (!group) {
+      group = {
+        groupId: meta.groupId,
+        groupLabel: meta.groupLabel,
+        windows: []
+      };
+      groupMap.set(meta.groupId, group);
+    }
+    group.windows.push(normalizedBucket);
+  }
+  const orderedGroups = [];
+  for (const id of knownGroupOrder) {
+    const group = groupMap.get(id);
+    if (group) {
+      group.windows.sort((a, b) => windowSortRank(a.windowLabel) - windowSortRank(b.windowLabel));
+      orderedGroups.push(group);
+      groupMap.delete(id);
+    }
+  }
+  for (const group of groupMap.values()) {
+    group.windows.sort((a, b) => windowSortRank(a.windowLabel) - windowSortRank(b.windowLabel));
+    orderedGroups.push(group);
+  }
+  const buckets = orderedGroups.flatMap((g) => g.windows);
+  return {
+    hasQuota: buckets.length > 0,
+    buckets,
+    groups: orderedGroups
+  };
+}
+function pad2(n) {
+  return n < 10 ? `0${Math.trunc(n)}` : `${Math.trunc(n)}`;
+}
 
 // src/statusline.ts
-var import_node_path4 = __toESM(require("node:path"));
 var colorReset = "\x1B[0m";
 var colorBlue = "\x1B[34m";
 var colorGreen = "\x1B[32m";
@@ -876,16 +594,22 @@ var colorMagenta = "\x1B[35m";
 var colorRed = "\x1B[31m";
 var colorOrange = "\x1B[38;5;208m";
 var colorMuted = "\x1B[90m";
+var titleColumns = 24;
+var modelMaxColumns = 18;
+var cwdMaxColumns = 32;
+var branchMaxColumns = 40;
+var stateMaxColumns = 20;
 function shortModelName(display) {
-  let short = display.split("Gemini").join("");
+  let short = sanitizePlainText(display, 64);
+  short = short.split("Gemini").join("");
   short = short.split("Claude").join("");
   short = short.split("Thinking").join("");
   short = short.split("(").join("");
   short = short.split(")").join("");
   short = short.split("Medium").join("Med");
   short = short.trim().split(/\s+/).filter(Boolean).join(" ");
-  if (visibleLen(short) > 18) {
-    short = `${truncateColumns(short, 15)}...`;
+  if (visibleLen(short) > modelMaxColumns) {
+    short = `${truncateColumns(short, modelMaxColumns - 3)}...`;
   }
   return short;
 }
@@ -901,12 +625,15 @@ function formatCost(usd) {
   }
   return "<$0.001";
 }
-var titleColumns = 24;
+function baseName(rawPath) {
+  if (typeof rawPath !== "string") return "";
+  const parts = rawPath.split(/[/\\]+/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : "";
+}
 function renderTitle(raw, config) {
-  if (!config.showTitle || typeof raw !== "string") return "";
-  const text = raw.replace(new RegExp("\\p{Cc}", "gu"), " ").replace(new RegExp("(?![\\u200C\\u200D\\u{E0020}-\\u{E007F}])\\p{Cf}", "gu"), "").trim().split(/\s+/).filter(Boolean).join(" ");
-  if (visibleLen(text) === 0) return "";
-  const clipped = visibleLen(text) > titleColumns ? `${truncateColumns(text, titleColumns - 1)}\u2026` : text;
+  if (!config.showTitle) return "";
+  const clipped = sanitizePlainText(raw, titleColumns);
+  if (clipped === "") return "";
   return colorize(clipped, colorMuted, config.color);
 }
 function renderCost(cost, config) {
@@ -916,38 +643,44 @@ function renderCost(cost, config) {
 }
 function render(payload, opts) {
   const config = opts.config;
-  const width = (payload.terminal_width ?? 0) <= 0 ? 80 : payload.terminal_width;
-  const modelDisplay = payload.model?.display_name || payload.model?.id || "Gemini";
-  const modelSegment = renderModelSegment(shortModelName(modelDisplay), payload.plan_tier ?? "", config) + renderMode(payload.cycle_mode, config);
+  const width = typeof payload.terminal_width === "number" && Number.isFinite(payload.terminal_width) && payload.terminal_width > 0 ? Math.trunc(payload.terminal_width) : 80;
+  const rawModel = payload.model?.display_name || payload.model?.id || "Gemini";
+  const modelDisplay = sanitizePlainText(rawModel, 64) || "Gemini";
+  const modelSegment = renderModelSegment(shortModelName(modelDisplay), typeof payload.plan_tier === "string" ? payload.plan_tier : "", config) + renderMode(payload.cycle_mode, config);
   const ctxPct = contextPercent(payload.context_window);
-  const stateLabel = state(payload.agent_state ?? "");
-  const quota = quotaInfo(opts.quota, modelDisplay, payload.quota, opts.now ?? /* @__PURE__ */ new Date());
+  const stateLabel = state(sanitizePlainText(payload.agent_state ?? "", stateMaxColumns));
+  const branch = config.showGitBranch ? sanitizePlainText(opts.gitBranch ?? payload.vcs?.branch ?? "", branchMaxColumns) : "";
+  const now = opts.now ?? /* @__PURE__ */ new Date();
+  const quota = normalizeQuota(payload.quota, modelDisplay, now, {
+    locale: config.locale,
+    timeZone: config.timeZone
+  });
   if (config.multiline) {
-    return renderMultiline(payload, config, width, modelSegment, ctxPct, quota, opts.gitBranch ?? "", stateLabel);
+    return renderMultiline(payload, config, width, modelSegment, ctxPct, quota, branch, stateLabel);
   }
-  return renderSingleLine(payload, config, width, modelSegment, ctxPct, quota, stateLabel);
+  return renderSingleLine(payload, config, width, modelSegment, ctxPct, quota, branch, stateLabel);
 }
-function renderMultiline(payload, config, width, modelSegment, ctxPct, quota, branch2, stateLabel) {
+function renderHeaderLine(payload, config, width, modelSegment, branch, stateLabel) {
+  const dirName = config.showCWD ? sanitizePlainText(baseName(payload.cwd), cwdMaxColumns) : "";
   const line1Parts = [colorize(modelSegment, colorBlue, config.color)];
-  if (config.showCWD && payload.cwd) {
-    line1Parts.push(colorize(withIcon(config, "\uF07C ", "") + import_node_path4.default.basename(payload.cwd), colorYellow, config.color));
+  if (dirName !== "") {
+    line1Parts.push(colorize(`${withIcon(config, "\uF07C ", "")}${dirName}`, colorYellow, config.color));
   }
-  if (config.showGitBranch && branch2 !== "") {
-    line1Parts.push(colorize(renderGitSegment(branch2, config), colorMagenta, config.color));
+  if (branch !== "") {
+    line1Parts.push(colorize(renderGitSegment(branch, config), colorMagenta, config.color));
   }
   const stateText = config.showAgentState ? colorize(stateLabel, stateColor(stateLabel), config.color) : "";
   const titleText = renderTitle(payload.conversation_title, config);
   const costText = renderCost(payload.cost, config);
   let line1 = joinHeader(...line1Parts, titleText, stateText, costText);
-  line1Parts.push(stateText);
   if (visibleLen(line1) > width) {
-    line1 = joinHeader(...line1Parts, costText);
+    line1 = joinHeader(...line1Parts, stateText, costText);
   }
   if (visibleLen(line1) > width) {
-    line1 = joinHeader(...line1Parts);
+    line1 = joinHeader(...line1Parts, stateText);
   }
   if (visibleLen(line1) > width) {
-    const git = config.showGitBranch && branch2 !== "" ? colorize(renderGitSegment(branch2, config), colorMagenta, config.color) : "";
+    const git = branch !== "" ? colorize(renderGitSegment(branch, config), colorMagenta, config.color) : "";
     line1 = joinHeader(colorize(modelSegment, colorBlue, config.color), git, stateText);
   }
   if (visibleLen(line1) > width) {
@@ -956,86 +689,198 @@ function renderMultiline(payload, config, width, modelSegment, ctxPct, quota, br
   if (visibleLen(line1) > width) {
     line1 = colorize(modelSegment, colorBlue, config.color);
   }
-  line1 = fit(line1, width);
-  let ctx = "Context ";
-  if (config.showProgressBar) {
-    ctx += `${progressBar(ctxPct, 10, config.color)} `;
+  return fit(line1, width);
+}
+function renderMultiline(payload, config, width, modelSegment, ctxPct, quota, branch, stateLabel) {
+  const line1 = renderHeaderLine(payload, config, width, modelSegment, branch, stateLabel);
+  if (quota.groups.length > 1 || quota.buckets.length > 1) {
+    const ctxLine = fitContextLine(payload.context_window, config, ctxPct, width);
+    const groupLabelWidth = Math.min(14, Math.max(...quota.groups.map((g) => visibleLen(g.groupLabel))));
+    const quotaLines = renderUniformQuotaGroupLines(quota.groups, config, width, groupLabelWidth);
+    return [line1, ctxLine, ...quotaLines].join("\n");
   }
-  ctx += contextValue(config, payload.context_window, ctxPct);
-  let usage2 = "";
-  if (quota.hasQuota) {
-    usage2 = usageLabel(config, quota, true);
-    if (quota.windows.length <= 1 && quota.reset !== "") {
-      usage2 += resetSuffix(config, quota.reset);
-    }
-  }
-  let line2 = joinHeader(ctx, usage2);
-  if (visibleLen(line2) > width) {
-    let usageNoBar = "";
-    if (quota.hasQuota) {
-      usageNoBar = usageLabel(config, quota, false);
-      if (quota.windows.length <= 1 && quota.reset !== "") {
-        usageNoBar += resetSuffix(config, quota.reset);
-      }
-    }
-    line2 = joinHeader(`Context ${contextValue(config, payload.context_window, ctxPct)}`, usageNoBar);
-  }
-  if (visibleLen(line2) > width) {
-    let usageCompact = "";
-    if (quota.hasQuota) {
-      usageCompact = usageLabel(config, quota, false);
-      if (quota.windows.length <= 1 && quota.reset !== "") {
-        usageCompact += resetSuffix(config, quota.reset);
-      }
-    }
-    line2 = joinHeader(`Context ${formatInt(ctxPct)}%`, usageCompact);
-  }
-  if (visibleLen(line2) > width) {
-    let coreUsage = "";
-    if (quota.hasQuota) {
-      coreUsage = `Use ${usageValue(config, quota.usagePct)}`;
-    }
-    line2 = join(`Ctx ${formatInt(ctxPct)}%`, coreUsage);
-  }
-  if (visibleLen(line2) > width) {
-    line2 = `${formatInt(ctxPct)}%`;
-  }
-  line2 = fit(line2, width);
+  const line2 = fitSingleQuotaLine2(payload.context_window, config, ctxPct, quota, width);
   return `${line1}
 ${line2}`;
 }
-function renderSingleLine(payload, config, width, modelSegment, ctxPct, quota, stateLabel) {
+function fitContextLine(ctxWindow, config, ctxPct, width) {
+  const candidates = [
+    `Context ${config.showProgressBar ? `${progressBar(ctxPct, 10, config.color)} ` : ""}${contextValue(config, ctxWindow, ctxPct)}`,
+    `Context ${contextValue(config, ctxWindow, ctxPct)}`,
+    `Ctx ${formatInt(ctxPct)}%`,
+    `${formatInt(ctxPct)}%`
+  ];
+  for (const candidate of candidates) {
+    if (visibleLen(candidate) <= width) return candidate;
+  }
+  return fit(`${formatInt(ctxPct)}%`, width);
+}
+function fitSingleQuotaLine2(ctxWindow, config, ctxPct, quota, width) {
+  const ctxFull = `Context ${config.showProgressBar ? `${progressBar(ctxPct, 10, config.color)} ` : ""}${contextValue(config, ctxWindow, ctxPct)}`;
+  const ctxNoBar = `Context ${contextValue(config, ctxWindow, ctxPct)}`;
+  const ctxPctOnly = `Context ${formatInt(ctxPct)}%`;
+  const ctxTiny = `Ctx ${formatInt(ctxPct)}%`;
+  if (!quota.hasQuota || quota.buckets.length === 0) {
+    const naText = colorize("Quota N/A", colorMuted, config.color);
+    const candidates2 = [
+      joinHeader(ctxFull, naText),
+      joinHeader(ctxNoBar, naText),
+      joinHeader(ctxPctOnly, naText),
+      join(ctxTiny, "Quota N/A"),
+      join(ctxTiny, "Q N/A"),
+      `${formatInt(ctxPct)}%`
+    ];
+    for (const c of candidates2) {
+      if (visibleLen(c) <= width) return c;
+    }
+    return fit(`${formatInt(ctxPct)}%`, width);
+  }
+  const bucket = quota.buckets[0];
+  const qFull = formatSingleBucket(bucket, config, { dateMode: "full", prefix: "Quota: " });
+  const qShortDate = formatSingleBucket(bucket, config, { dateMode: "short", prefix: "Quota: " });
+  const qCountdownOnly = formatSingleBucket(bucket, config, { dateMode: "none", prefix: "Quota: " });
+  const qPctOnly = `Quota: ${bucket.label}: ${quotaAmountText(bucket, config)}`;
+  const qCompact = `${bucket.label}: ${quotaAmountText(bucket, config)}`;
+  const qTiny = `${bucket.label}: ${quotaCompactPct(bucket, config)}`;
+  const candidates = [
+    joinHeader(ctxFull, qFull),
+    joinHeader(ctxNoBar, qFull),
+    joinHeader(ctxPctOnly, qFull),
+    joinHeader(ctxPctOnly, qShortDate),
+    joinHeader(ctxPctOnly, qCountdownOnly),
+    joinHeader(ctxTiny, qCountdownOnly),
+    join(ctxTiny, qPctOnly),
+    join(ctxTiny, qCompact),
+    join(ctxTiny, qTiny),
+    `${formatInt(ctxPct)}%`
+  ];
+  for (const c of candidates) {
+    if (visibleLen(c) <= width) return c;
+  }
+  return fit(`${formatInt(ctxPct)}%`, width);
+}
+function formatGroupWindow(win, config, opts) {
+  const labelPart = win.windowLabel !== "" ? `${win.windowLabel}: ` : "";
+  const pctPart = config.usageValue === "percent" ? `${formatInt(win.usedPct)}%${opts.includeLeftWord ? " used" : ""}` : `${formatInt(win.remainingPct)}%${opts.includeLeftWord ? " left" : ""}`;
+  let resetPart = "";
+  if (opts.dateMode !== "omit") {
+    if (win.resetPastDue) {
+      resetPart = opts.pastDueShort ? " (Reset due)" : " (Reset due / awaiting update)";
+    } else if (win.resetAt !== null) {
+      if (opts.dateMode === "full") {
+        resetPart = ` (${win.countdownText}, ${win.absoluteText})`;
+      } else if (opts.dateMode === "short") {
+        resetPart = ` (${win.countdownText}, ${win.shortAbsoluteText})`;
+      } else {
+        resetPart = ` (${win.countdownText})`;
+      }
+    }
+  }
+  return `${labelPart}${pctPart}${resetPart}`;
+}
+var groupTiers = [
+  {
+    padded: true,
+    sep: " \u2502 ",
+    opts: { includeLeftWord: true, dateMode: "full", pastDueShort: false }
+  },
+  {
+    padded: true,
+    sep: " \u2502 ",
+    opts: { includeLeftWord: true, dateMode: "short", pastDueShort: false }
+  },
+  {
+    padded: true,
+    sep: " \u2502 ",
+    opts: { includeLeftWord: false, dateMode: "short", pastDueShort: true }
+  },
+  {
+    padded: true,
+    sep: " \u2502 ",
+    opts: { includeLeftWord: true, dateMode: "none", pastDueShort: true }
+  },
+  {
+    padded: false,
+    sep: " | ",
+    opts: { includeLeftWord: true, dateMode: "none", pastDueShort: true }
+  },
+  {
+    padded: false,
+    sep: " | ",
+    opts: { includeLeftWord: false, dateMode: "none", pastDueShort: true }
+  },
+  {
+    padded: false,
+    sep: " | ",
+    opts: { includeLeftWord: false, dateMode: "omit", pastDueShort: true }
+  }
+];
+function renderGroupLinesAtTier(groups, config, groupLabelWidth, tier) {
+  if (tier.padded) {
+    const has5h = groups.some((g) => g.windows.some((w) => w.windowLabel === "5h"));
+    const hasSecondary = groups.some((g) => g.windows.some((w) => w.windowLabel !== "5h"));
+    if (has5h && hasSecondary) {
+      const rows = groups.map((group) => {
+        const win5h = group.windows.find((w) => w.windowLabel === "5h");
+        const otherWins = group.windows.filter((w) => w.windowLabel !== "5h");
+        return {
+          group,
+          col5hText: win5h ? formatGroupWindow(win5h, config, tier.opts) : "",
+          otherTexts: otherWins.map((w) => formatGroupWindow(w, config, tier.opts))
+        };
+      });
+      const col5hWidth = Math.max(0, ...rows.map((r) => visibleLen(r.col5hText)));
+      if (col5hWidth > 0) {
+        return rows.map((row) => {
+          const header = ` ${padRightColumns(row.group.groupLabel, groupLabelWidth)} \u2502 `;
+          const col5hCell = padRightColumns(row.col5hText, col5hWidth);
+          return `${header}${col5hCell}${row.otherTexts.length > 0 ? tier.sep + row.otherTexts.join(tier.sep) : ""}`;
+        });
+      }
+    }
+  }
+  return groups.map((group) => {
+    const header = tier.padded ? ` ${padRightColumns(group.groupLabel, groupLabelWidth)} \u2502 ` : `${group.groupLabel}: `;
+    const body = group.windows.map((win) => formatGroupWindow(win, config, tier.opts)).join(tier.sep);
+    return `${header}${body}`;
+  });
+}
+function renderUniformQuotaGroupLines(groups, config, width, groupLabelWidth) {
+  for (const tier of groupTiers) {
+    const rendered = renderGroupLinesAtTier(groups, config, groupLabelWidth, tier);
+    if (rendered.every((line) => visibleLen(line) <= width)) {
+      return rendered;
+    }
+  }
+  const fallbackTier = groupTiers[groupTiers.length - 1];
+  return renderGroupLinesAtTier(groups, config, groupLabelWidth, fallbackTier).map((line) => fit(line, width));
+}
+function renderSingleLine(payload, config, width, modelSegment, ctxPct, quota, branch, stateLabel) {
   const coloredBadge = colorize(modelSegment, colorBlue, config.color);
   const ctx = `Ctx ${contextValue(config, payload.context_window, ctxPct)}`;
-  let tokens = tokenDetail(payload.context_window);
-  if (tokens !== "" && config.contextValue === "percent") {
-    tokens = colorize(tokens, colorMuted, config.color);
-  } else {
-    tokens = "";
-  }
-  let usage2 = "";
-  if (quota.hasQuota) {
-    let text = usageLabel(config, quota, false);
-    if (quota.windows.length <= 1 && quota.reset !== "") {
-      text += resetSuffix(config, quota.reset);
-    }
-    usage2 = colorize(text, colorMuted, config.color);
-  }
+  const ctxSimple = `Ctx ${formatInt(ctxPct)}%`;
+  const tokens = config.contextValue === "percent" ? colorize(tokenDetail(payload.context_window), colorMuted, config.color) : "";
+  const bar = config.showProgressBar ? progressBar(ctxPct, 10, config.color) : "";
+  const branchText = branch !== "" ? colorize(renderGitSegment(branch, config), colorMagenta, config.color) : "";
   const stateText = config.showAgentState ? colorize(stateLabel, stateColor(stateLabel), config.color) : "";
   const costText = renderCost(payload.cost, config);
   const titleText = renderTitle(payload.conversation_title, config);
-  let bar = "";
-  if (config.showProgressBar) {
-    bar = progressBar(ctxPct, 10, config.color);
-  }
+  const qFull = singleLineQuotaText(quota, config, "full");
+  const qShort = singleLineQuotaText(quota, config, "short");
+  const qCountdown = singleLineQuotaText(quota, config, "none");
+  const qCompact = singleLineQuotaText(quota, config, "pct-only");
   const levels = [
-    [coloredBadge, ctx, tokens, bar, usage2, titleText, stateText, costText],
-    [coloredBadge, ctx, tokens, bar, usage2, stateText, costText],
-    [coloredBadge, ctx, tokens, bar, usage2, stateText],
-    [coloredBadge, ctx, bar, usage2, stateText],
-    [coloredBadge, ctx, usage2, stateText],
-    [coloredBadge, ctx, stateText],
-    [ctx, stateText],
+    [coloredBadge, ctx, tokens, bar, qFull, branchText, titleText, stateText, costText],
+    [coloredBadge, ctx, tokens, bar, qFull, titleText, stateText, costText],
+    [coloredBadge, ctx, tokens, bar, qFull, stateText, costText],
+    [coloredBadge, ctx, bar, qFull, stateText],
+    [coloredBadge, ctx, qFull, stateText],
+    [coloredBadge, ctxSimple, qShort, stateText],
+    [coloredBadge, ctxSimple, qCountdown, stateText],
+    [coloredBadge, ctxSimple, qCompact, stateText],
+    [coloredBadge, ctxSimple, stateText],
+    [ctxSimple, qCompact, stateText],
+    [ctxSimple, stateText],
     [`${formatInt(ctxPct)}%`, stateLabel]
   ];
   for (const parts of levels) {
@@ -1045,6 +890,63 @@ function renderSingleLine(payload, config, width, modelSegment, ctxPct, quota, s
     }
   }
   return fit(`${formatInt(ctxPct)}% ${stateLabel}`, width);
+}
+function singleLineQuotaText(quota, config, mode) {
+  if (!quota.hasQuota || quota.buckets.length === 0) {
+    return colorize(mode === "pct-only" ? "Q N/A" : "Quota N/A", colorMuted, config.color);
+  }
+  if (quota.groups.length === 1 && quota.buckets.length === 1) {
+    const b = quota.buckets[0];
+    if (mode === "pct-only") return `Quota: ${b.label}: ${quotaAmountText(b, config)}`;
+    return formatSingleBucket(b, config, { dateMode: mode, prefix: "Quota: " });
+  }
+  if (mode === "pct-only") {
+    return `Quota ${quota.groups.map(
+      (g) => `${g.groupLabel}: ${g.windows.map((w) => `${w.windowLabel ? `${w.windowLabel}: ` : ""}${quotaCompactPct(w, config)}`).join(" / ")}`
+    ).join(" | ")}`;
+  }
+  return `Quota ${quota.groups.map((g) => {
+    const windows = g.windows.map(
+      (w) => formatGroupWindow(w, config, {
+        includeLeftWord: true,
+        dateMode: mode,
+        pastDueShort: true
+      })
+    ).join(" / ");
+    return `${g.groupLabel}: ${windows}`;
+  }).join(" | ")}`;
+}
+function formatSingleBucket(bucket, config, opts) {
+  const amount = quotaAmountText(bucket, config);
+  const reset = formatBucketResetPart(bucket, opts.dateMode);
+  return `${opts.prefix}${bucket.label}: ${amount}${reset ? ` (${reset})` : ""}`;
+}
+function formatBucketResetPart(bucket, dateMode) {
+  if (bucket.resetPastDue) {
+    return dateMode === "short" ? "Reset due" : bucket.absoluteText;
+  }
+  if (bucket.resetAt === null) {
+    return "";
+  }
+  if (dateMode === "full") {
+    return `${bucket.countdownText}, ${bucket.absoluteText}`;
+  }
+  if (dateMode === "short") {
+    return `${bucket.countdownText}, ${bucket.shortAbsoluteText}`;
+  }
+  return bucket.countdownText;
+}
+function quotaAmountText(bucket, config) {
+  if (config.usageValue === "percent") {
+    return `${formatInt(bucket.usedPct)}% used`;
+  }
+  return `${formatInt(bucket.remainingPct)}% left`;
+}
+function quotaCompactPct(bucket, config) {
+  if (config.usageValue === "percent") {
+    return `${formatInt(bucket.usedPct)}% used`;
+  }
+  return `${formatInt(bucket.remainingPct)}%`;
 }
 function renderModelSegment(shortModel, rawPlan, config) {
   const trimmed = rawPlan.trim();
@@ -1079,205 +981,11 @@ function renderPlan(plan, config) {
   }
   return plan;
 }
-function renderGitSegment(branch2, config) {
-  if (branch2 === "git") {
-    return `${withIcon(config, "\uE725 ", "")}git`;
-  }
-  return `${withIcon(config, "\uE725 ", "")}${branch2}`;
-}
-function resetSuffix(config, reset) {
-  return ` ${withIcon(config, "\u21BB ", "")}Reset ${reset}`;
-}
-function inlineResetSuffix(config, reset) {
-  if (reset === "") {
-    return "";
-  }
-  return ` (${withIcon(config, "\u21BB ", "")}${reset})`;
+function renderGitSegment(branch, config) {
+  return `${withIcon(config, "\uE725 ", "")}${branch}`;
 }
 function withIcon(config, icon, fallback) {
   return config.showIcons ? icon : fallback;
-}
-function quotaInfo(cache, modelDisplay, officialQuota, now) {
-  const cachedBuckets = liveCachedBuckets(cache, now);
-  if (cachedBuckets !== null) {
-    const merged = mergeQuotaBuckets(officialQuota ?? {}, cachedBuckets, now);
-    const plan = officialQuota && geminiPlanKeys.some((key) => Object.prototype.hasOwnProperty.call(officialQuota, key)) ? officialQuota : merged;
-    const mergedInfo = officialQuotaInfo(merged, modelDisplay, plan);
-    if (mergedInfo !== null) {
-      return mergedInfo;
-    }
-  }
-  const cacheInfo = cacheQuotaInfo(cache, modelDisplay);
-  const official = officialQuotaInfo(officialQuota, modelDisplay);
-  if (official !== null) {
-    if (official.hasQuota && cacheInfo !== null && cacheInfo.hasQuota && cacheIsFresh(cache, now)) {
-      return mergeFreshCacheQuota(official, cacheInfo);
-    }
-    return official;
-  }
-  if (cacheInfo !== null) {
-    return cacheInfo;
-  }
-  return noQuota();
-}
-function cacheQuotaInfo(cache, modelDisplay) {
-  const [quota, ok] = matchModel(cache, modelDisplay);
-  if (!ok || quota === null) {
-    return null;
-  }
-  const usagePct = usagePercent(quota);
-  const reset = usagePct > 0 ? formatResetClock(quota.resetTime) : "";
-  return quotaDisplay([{ label: "", usagePct, reset }]);
-}
-function liveCachedBuckets(cache, now) {
-  if (!cache?.quota || typeof cache.quota !== "object") {
-    return null;
-  }
-  const live = {};
-  for (const [key, bucket] of Object.entries(cache.quota)) {
-    const reset = Date.parse(bucket?.reset_time ?? "");
-    if (!Number.isFinite(bucket?.remaining_fraction) || !Number.isFinite(reset) || reset <= now.getTime()) {
-      continue;
-    }
-    live[key] = {
-      remaining_fraction: bucket.remaining_fraction,
-      reset_time: bucket.reset_time,
-      reset_in_seconds: Math.trunc((reset - now.getTime()) / 1e3)
-    };
-  }
-  return Object.keys(live).length > 0 ? live : null;
-}
-function mergeQuotaBuckets(official, cached, now) {
-  const merged = { ...official };
-  for (const [key, fromCache] of Object.entries(cached)) {
-    const fromPayload = Object.prototype.hasOwnProperty.call(official, key) ? official[key] : void 0;
-    if (!fromPayload || !Number.isFinite(fromPayload.remaining_fraction)) {
-      merged[key] = fromCache;
-      continue;
-    }
-    const payloadReset = Date.parse(fromPayload.reset_time ?? "");
-    const payloadEnded = Number.isFinite(payloadReset) && payloadReset <= now.getTime();
-    if (payloadEnded || (fromCache.remaining_fraction ?? 1) <= (fromPayload.remaining_fraction ?? 1)) {
-      merged[key] = fromCache;
-    }
-  }
-  return merged;
-}
-function cacheIsFresh(cache, now) {
-  if (!cache?.timestamp) {
-    return false;
-  }
-  const cacheTime = new Date(cache.timestamp);
-  if (Number.isNaN(cacheTime.getTime())) {
-    return false;
-  }
-  return now.getTime() - cacheTime.getTime() <= 5 * 60 * 1e3;
-}
-function officialQuotaInfo(officialQuota, modelDisplay, plan = officialQuota) {
-  if (!officialQuota) {
-    return null;
-  }
-  const keys = officialQuotaKeys(modelDisplay, plan ?? officialQuota);
-  const buckets = [];
-  let sawKnownBucket = false;
-  for (const { key, label } of keys) {
-    if (!Object.prototype.hasOwnProperty.call(officialQuota, key)) {
-      continue;
-    }
-    sawKnownBucket = true;
-    const bucket = officialQuota[key];
-    if (Number.isFinite(bucket.remaining_fraction)) {
-      const usagePct = usagePercent({
-        remainingFraction: bucket.remaining_fraction ?? 1,
-        resetTime: bucket.reset_time ?? ""
-      });
-      const reset = usagePct > 0 ? formatOfficialReset(bucket) : "";
-      buckets.push({ label, usagePct, reset });
-    }
-  }
-  if (buckets.length === 0) {
-    return sawKnownBucket ? noQuota() : null;
-  }
-  return quotaDisplay(buckets);
-}
-function mergeFreshCacheQuota(official, cache) {
-  if (!cache.hasQuota || cache.windows.length === 0) {
-    return official;
-  }
-  const cacheWindow = cache.windows[0];
-  const windows = official.windows.map((window) => {
-    if (window.label !== "5h") {
-      return window;
-    }
-    if (cacheWindow.usagePct <= window.usagePct) {
-      return window;
-    }
-    return { ...window, usagePct: cacheWindow.usagePct, reset: cacheWindow.reset };
-  });
-  const hasFiveHourWindow = windows.some((window) => window.label === "5h");
-  if (!hasFiveHourWindow && cacheWindow.usagePct > official.usagePct) {
-    return cache;
-  }
-  return quotaDisplay(windows);
-}
-function quotaDisplay(windows) {
-  let selected = windows[0] ?? { label: "", usagePct: 0, reset: "" };
-  for (const window of windows.slice(1)) {
-    if (window.usagePct > selected.usagePct) {
-      selected = window;
-    }
-  }
-  return {
-    usagePct: selected.usagePct,
-    reset: selected.reset,
-    hasQuota: windows.length > 0,
-    windows
-  };
-}
-function noQuota() {
-  return { usagePct: 0, reset: "", hasQuota: false, windows: [] };
-}
-var argonWeeklyKey = "gemini-argon-wtu-weekly";
-var geminiPlanKeys = ["gemini-5h", "gemini-weekly", argonWeeklyKey];
-function officialQuotaKeys(modelDisplay, quota) {
-  const normalized = modelDisplay.toLowerCase();
-  if (normalized.includes("claude") || normalized.includes("gpt") || normalized.includes("oss")) {
-    return [{ key: "3p-5h", label: "5h" }, { key: "3p-weekly", label: "W" }];
-  }
-  if (normalized.includes("argon") && Object.prototype.hasOwnProperty.call(quota, argonWeeklyKey)) {
-    return [{ key: argonWeeklyKey, label: "W" }];
-  }
-  return [{ key: "gemini-5h", label: "5h" }, { key: "gemini-weekly", label: "W" }];
-}
-function formatResetClock(reset) {
-  if (reset === "") {
-    return "";
-  }
-  const target = new Date(reset.replace("Z", "+00:00"));
-  if (Number.isNaN(target.getTime())) {
-    return "";
-  }
-  return `${pad2(target.getHours())}:${pad2(target.getMinutes())}`;
-}
-function formatOfficialReset(bucket) {
-  if (Number.isFinite(bucket.reset_in_seconds) && (bucket.reset_in_seconds ?? 0) > 0) {
-    return formatResetDuration(bucket.reset_in_seconds ?? 0);
-  }
-  return formatResetClock(bucket.reset_time ?? "");
-}
-function formatResetDuration(seconds) {
-  let totalMinutes = Math.max(0, Math.trunc(seconds / 60));
-  const days = Math.trunc(totalMinutes / (24 * 60));
-  totalMinutes -= days * 24 * 60;
-  const hours = Math.trunc(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (days > 0) {
-    return `${formatInt(days)}d ${formatInt(hours)}h`;
-  }
-  if (hours > 0) {
-    return `${formatInt(hours)}h ${formatInt(minutes)}m`;
-  }
-  return `${formatInt(minutes)}m`;
 }
 function contextValue(config, ctx, pct) {
   const tokens = tokenDetail(ctx);
@@ -1307,43 +1015,10 @@ function contextPercent(ctx) {
   }
   return clampInt(Math.trunc(upstream + 0.5));
 }
-function usageLabel(config, quota, withBar) {
-  if (quota.windows.length > 1) {
-    return `Usage ${quota.windows.map((window) => usageWindowLabel(config, window, withBar)).join(" |  ")}`;
-  }
-  let label = "Usage ";
-  if (withBar && config.showProgressBar) {
-    label += `${usageBar(config, quota.usagePct)} `;
-  }
-  return label + usageValue(config, quota.usagePct);
-}
-function usageWindowLabel(config, window, withBar) {
-  let label = "";
-  if (withBar && config.showProgressBar) {
-    label += `${usageBar(config, window.usagePct, 10)} `;
-  }
-  return label + usageWindowValue(config, window.usagePct) + inlineResetSuffix(config, window.reset);
-}
-function usageWindowValue(config, usagePct) {
-  if (config.usageValue === "remaining") {
-    return `${formatInt(100 - usagePct)}%`;
-  }
-  return `${formatInt(usagePct)}%`;
-}
-function usageValue(config, usagePct) {
-  if (config.usageValue === "remaining") {
-    return `${formatInt(100 - usagePct)}% left`;
-  }
-  return `${formatInt(usagePct)}%`;
-}
-function usageBar(config, usagePct, width = 8) {
-  const fillPct = config.usageValue === "remaining" ? 100 - usagePct : usagePct;
-  return progressBarWithColor(fillPct, usagePct, width, config.color);
-}
 function tokenDetail(ctx) {
   const total = ctx?.total_input_tokens;
   const windowSize = ctx?.context_window_size ?? 0;
-  if (typeof total !== "number" || total <= 0 || windowSize <= 0) {
+  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0 || !Number.isFinite(windowSize) || windowSize <= 0) {
     return "";
   }
   return `(${formatTokens(total)}/${formatTokens(windowSize)})`;
@@ -1424,6 +1099,11 @@ function fit(input, width) {
   }
   return truncateColumns(input, width);
 }
+function padRightColumns(input, targetCols) {
+  const len = visibleLen(input);
+  if (len >= targetCols) return input;
+  return `${input}${" ".repeat(targetCols - len)}`;
+}
 function clampInt(n) {
   if (n < 0) return 0;
   if (n > 100) return 100;
@@ -1431,12 +1111,6 @@ function clampInt(n) {
 }
 function formatInt(n) {
   return Math.trunc(n).toString(10);
-}
-function pad2(n) {
-  if (n < 10) {
-    return `0${formatInt(n)}`;
-  }
-  return formatInt(n);
 }
 function title(raw) {
   const fields = raw.trim().split(/\s+/).filter(Boolean);
@@ -1453,556 +1127,122 @@ function title(raw) {
   return fields.join(" ");
 }
 
-// src/doctor.ts
-var iconProbe = [
-  { glyph: "\uEE9C", label: "model" },
-  { glyph: "\uF0A3", label: "plan" },
-  { glyph: "\uE725", label: "branch" },
-  { glyph: "\uF07C", label: "folder" }
-];
-var nerdFontPattern = /nerd[\s_-]*font|nf-[a-z]/i;
-function collectDoctorReport(deps) {
-  const config = resolveConfig(deps);
-  const [nerdFont, nerdFontMatches] = scanNerdFont(deps);
-  const [statuslineCommand, statuslineWired] = readStatuslineCommand(deps);
-  const suggested = config.path ?? homeConfigPath(deps);
-  const [installedPluginStatus, installedPlugin] = readInstalledPlugin(deps);
-  return {
-    version: deps.version,
-    homedir: deps.homedir,
-    nodeVersion: deps.nodeVersion,
-    nodeOk: nodeMajor(deps.nodeVersion) >= 18,
-    platform: deps.platform,
-    statuslineCommand,
-    statuslineWired,
-    configPath: config.path,
-    suggestedConfigPath: suggested,
-    userConfigPath: homeConfigPath(deps),
-    configInPluginDir: config.path !== null && deps.pluginConfigPaths.includes(config.path),
-    showIcons: config.value.showIcons,
-    terminal: detectTerminal(deps.env),
-    remoteSession: Boolean(deps.env.SSH_CONNECTION || deps.env.SSH_TTY),
-    nerdFont,
-    nerdFontMatches,
-    installedPlugin,
-    installedPluginStatus,
-    // A status line owned by another tool is not ours to rewire, so the comparison only applies when
-    // the command runs agy-hud at all.
-    statuslineRunsInstalled: statuslineWired ? runsInstalledCopy(statuslineCommand, installedPlugin, deps.homedir, deps.platform) : null
-  };
-}
-function readInstalledPlugin(deps) {
-  const raw = deps.pluginList ? deps.pluginList() : null;
-  if (raw === null) {
-    return ["unknown", null];
-  }
+// src/main.ts
+var version = "0.2.0-passive";
+var maxStdinBytes = 1024 * 1024;
+var stdinTimeoutMs = 1e3;
+var utf8Fatal = new TextDecoder("utf-8", { fatal: true });
+function parsePayloadObject(input) {
+  if (input.trim() === "") return null;
   let parsed;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(input);
   } catch {
-    return ["unknown", null];
-  }
-  if (!Array.isArray(parsed)) {
-    return ["unknown", null];
-  }
-  const entry = parsed.find((item) => item?.name === "agy-hud");
-  if (entry === void 0) {
-    return ["not-installed", null];
-  }
-  if (typeof entry.path !== "string" || entry.path === "") {
-    return ["unknown", null];
-  }
-  return ["found", {
-    version: typeof entry.version === "string" ? entry.version : "",
-    path: entry.path,
-    enabled: entry.enabled !== false
-  }];
-}
-function runsInstalledCopy(command, plugin, homedir, platform) {
-  if (command === null || plugin === null) {
     return null;
   }
-  const windows = platform === "win32";
-  const fold = windows ? (text) => text.split("\\").join("/").toLowerCase() : (text) => text;
-  const home = fold(homedir).replace(/\/$/, "");
-  let expanded = fold(command);
-  if (home !== "") {
-    expanded = expanded.replace(/(^|\s)~\//g, (_, lead) => `${lead}${home}/`);
-    for (const token of windows ? ["${HOME}/", "$HOME/", "%USERPROFILE%/"] : ["${HOME}/", "$HOME/"]) {
-      expanded = expanded.split(fold(token)).join(`${home}/`);
-    }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
   }
-  const pluginPath = fold(plugin.path);
-  const root = pluginPath.endsWith("/") ? pluginPath : `${pluginPath}/`;
-  return expanded.includes(root);
+  return parsed;
 }
-function detectTerminal(env) {
-  if (env.TERM_PROGRAM) {
-    return env.TERM_PROGRAM;
-  }
-  if (env.WT_SESSION) {
-    return "Windows Terminal";
-  }
-  if (env.KITTY_WINDOW_ID) {
-    return "kitty";
-  }
-  if (env.ALACRITTY_SOCKET || env.ALACRITTY_WINDOW_ID) {
-    return "Alacritty";
-  }
-  const term = env.TERM ?? "";
-  if (term.includes("kitty")) {
-    return "kitty";
-  }
-  if (term.includes("alacritty")) {
-    return "Alacritty";
-  }
-  return "unknown";
-}
-function nodeMajor(version2) {
-  const match = /^v?(\d+)\./.exec(version2);
-  return match ? Number(match[1]) : -1;
-}
-function resolveConfig(deps) {
-  for (const candidate of deps.configPaths) {
-    const raw = deps.readFile(candidate);
-    if (raw !== null) {
-      return { path: candidate, value: parseConfig(raw) };
-    }
-  }
-  return { path: null, value: defaultConfig() };
-}
-function homeConfigPath(deps) {
-  if (deps.userConfigPath !== "") {
-    return deps.userConfigPath;
-  }
-  return deps.homedir === "" ? "/.config/agy-hud/config.json" : `${deps.homedir}/.config/agy-hud/config.json`;
-}
-function readStatuslineCommand(deps) {
-  const sep = separator(deps.platform);
-  const raw = deps.readFile([deps.homedir, ".gemini", "antigravity-cli", "settings.json"].join(sep));
-  if (raw === null) {
-    return [null, false];
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(stripBom(raw));
-  } catch {
-    return [null, false];
-  }
-  const statusLine = parsed?.statusLine;
-  const command = typeof statusLine?.command === "string" ? statusLine.command : null;
-  if (command === null || command === "") {
-    return [null, false];
-  }
-  return [command, (deps.platform === "win32" ? command.toLowerCase() : command).includes("agy-hud")];
-}
-function scanNerdFont(deps) {
-  if (deps.platform === "linux") {
-    const output = deps.fcList ? deps.fcList() : null;
-    if (output === null) {
-      return ["unknown", []];
-    }
-    const matches2 = output.split("\n").filter((line) => nerdFontPattern.test(line)).slice(0, 5).map(clip);
-    return [matches2.length > 0 ? "found" : "not-found", matches2];
-  }
-  const matches = [];
-  for (const dir of fontDirs(deps)) {
-    for (const entry of deps.listDir(dir)) {
-      if (nerdFontPattern.test(entry) && !matches.includes(entry)) {
-        matches.push(clip(entry));
-      }
-    }
-  }
-  return [matches.length > 0 ? "found" : "not-found", matches.slice(0, 5)];
-}
-function clip(name) {
-  const trimmed = name.trim();
-  return trimmed.length > 30 ? trimmed.slice(0, 29) + "\u2026" : trimmed;
-}
-function fontDirs(deps) {
-  if (deps.platform === "win32") {
-    const windir = deps.env.WINDIR || "C:\\Windows";
-    const localAppData = deps.env.LOCALAPPDATA || `${deps.homedir}\\AppData\\Local`;
-    return [`${windir}\\Fonts`, `${localAppData}\\Microsoft\\Windows\\Fonts`];
-  }
-  return [`${deps.homedir}/Library/Fonts`, "/Library/Fonts", "/System/Library/Fonts"];
-}
-function fontSettingHint(terminal) {
-  switch (terminal) {
-    case "iTerm.app":
-      return "iTerm2 -> Settings -> Profiles -> Text -> Font";
-    case "Apple_Terminal":
-      return "Terminal -> Settings -> Profiles -> Text -> Font";
-    case "vscode":
-      return "VS Code setting terminal.integrated.fontFamily";
-    case "ghostty":
-      return "font-family in ~/.config/ghostty/config";
-    case "WezTerm":
-      return "wezterm.font in ~/.wezterm.lua";
-    case "Alacritty":
-      return "font.normal.family in ~/.config/alacritty/alacritty.toml";
-    case "kitty":
-      return "font_family in ~/.config/kitty/kitty.conf";
-    case "Hyper":
-      return "config.fontFamily in ~/.hyper.js";
-    case "tabby":
-      return "Tabby -> Settings -> Appearance -> Font";
-    case "Windows Terminal":
-      return "Windows Terminal -> Settings -> Profiles -> Defaults -> Appearance -> Font face";
-    default:
-      return "your terminal's font setting (profile or config file)";
-  }
-}
-function abbreviate(text, homedir, platform) {
-  if (platform === "win32") {
-    return abbreviateWindows(text, homedir);
-  }
-  if (homedir === "" || homedir === "/") {
-    return text;
-  }
-  const prefix = (homedir.endsWith("/") ? homedir.slice(0, -1) : homedir) + "/";
-  return text.split(prefix).join("~/");
-}
-function abbreviateWindows(text, homedir) {
-  const unc = /^[\\/]{2}/.test(homedir);
-  const parts = homedir.split(/[\\/]+/).filter((part) => part !== "");
-  if (parts.length < (unc ? 3 : 2)) {
-    return text;
-  }
-  const pattern = (unc ? "[\\\\/]{2}" : "") + parts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\\\/]");
-  return text.replace(new RegExp(`${pattern}([\\\\/])`, "gi"), (_, sep) => `~${sep}`);
-}
-function separator(platform) {
-  return platform === "win32" ? "\\" : "/";
-}
-function hookName(platform) {
-  return platform === "win32" ? "status-line.cmd" : "status-line.sh";
-}
-function formatDoctorReport(report) {
-  const lines = [];
-  const row = (label, value) => lines.push(`  ${label.padEnd(12)}${value}`);
-  const rows = (label, values) => {
-    row(label, values[0]);
-    for (const extra of values.slice(1)) lines.push(" ".repeat(14) + extra);
-  };
-  const short = (filePath) => abbreviate(filePath, report.homedir, report.platform);
-  const sep = separator(report.platform);
-  const windows = report.platform === "win32";
-  lines.push("agy-hud doctor");
-  lines.push("");
-  row("plugin", report.version);
-  row("node", `${report.nodeVersion}${report.nodeOk ? "" : "   too old, 18+ required"}`);
-  row("statusline", report.statuslineCommand ? `${short(report.statuslineCommand)}${report.statuslineWired ? "" : "   not pointing at agy-hud"}` : `not configured \u2014 run /statusline <plugin-root>${sep}hooks${sep}${hookName(report.platform)} in the CLI`);
-  rows("installed", installedLines(report, short));
-  rows("config", [
-    report.configPath ? `${short(report.configPath)} (show_icons: ${report.showIcons})` : `none found, using defaults (show_icons: ${report.showIcons})`,
-    // Still the file in effect, so option A below keeps naming it; this is about the next upgrade.
-    ...report.configInPluginDir ? [
-      "inside the plugin directory, which `agy plugin install` replaces on",
-      "Antigravity CLI 1.1.28+, deleting this file. To keep your settings,",
-      `move it to ${short(report.userConfigPath)}`
-    ] : []
-  ]);
-  row("terminal", report.terminal);
-  row("session", report.remoteSession ? "remote (SSH)" : "local");
-  rows("nerd font", nerdFontLines(report));
-  lines.push("");
-  lines.push("Icon probe. Each label below must be preceded by its own distinct glyph:");
-  lines.push("");
-  lines.push(`  ${iconProbe.map((icon) => `${icon.glyph} ${icon.label}`).join("    ")}`);
-  lines.push("");
-  lines.push("A box, [?], or blank in front of any label means the terminal font has no Nerd Font");
-  lines.push("glyph for it. The HUD is working; the font cannot draw it. Two ways forward:");
-  lines.push("");
-  lines.push("  A. Turn icons off. Instant, always works, no font needed:");
-  if (report.configPath) {
-    lines.push(`       This install already has a config file, and it is the one that wins:`);
-    lines.push(`         ${short(report.configPath)}`);
-    lines.push('       Set "show_icons": false in it. Edit that file, do not create another one:');
-    lines.push("       a config next to the bundle outranks the one under ~/.config, so a new file");
-    lines.push("       there would be shadowed and nothing would change.");
-  } else if (windows) {
-    lines.push(`       New-Item -ItemType Directory -Force -Path "${short(dirname(report.suggestedConfigPath, report.platform))}" | Out-Null`);
-    lines.push(`       Set-Content -Encoding ascii -Path "${short(report.suggestedConfigPath)}" -Value '{"show_icons": false}'`);
-  } else {
-    lines.push(`       mkdir -p ${short(dirname(report.suggestedConfigPath, report.platform))}`);
-    lines.push(`       echo '{"show_icons": false}' > ${short(report.suggestedConfigPath)}`);
-  }
-  lines.push("");
-  lines.push("  B. Keep icons. This takes two steps, and the second is the one that matters:");
-  lines.push(windows ? "       1. Install a Nerd Font, e.g. Hack Nerd Font from https://www.nerdfonts.com" : "       1. Install a Nerd Font, e.g. brew install --cask font-hack-nerd-font");
-  lines.push(`       2. Point the terminal at it: ${fontSettingHint(report.terminal)}`);
-  lines.push("     Step 1 alone changes nothing on screen.");
-  if (report.remoteSession) {
-    lines.push("");
-    lines.push("  This is an SSH session. Glyphs are drawn by the terminal on your local machine, so");
-    lines.push("  a font installed on this host cannot change anything. Do both steps of option B on");
-    lines.push("  the local machine, or take option A here.");
-  }
-  return lines.join("\n") + "\n";
-}
-function installedLines(report, short) {
-  if (report.installedPluginStatus === "unknown" || report.installedPlugin === null) {
-    return report.installedPluginStatus === "not-installed" ? ["not installed as an Antigravity plugin"] : ["unknown: `agy plugin list --json` (CLI 1.3.4+) gave no usable agy-hud entry"];
-  }
-  const plugin = report.installedPlugin;
-  const out = [`${plugin.version || "?"}, ${plugin.enabled ? "enabled" : "disabled"} \u2014 ${short(plugin.path)}`];
-  if (report.statuslineRunsInstalled === false) {
-    out.push("the status line runs a different copy, so upgrades installed with");
-    out.push("`agy plugin install` will not reach it. Rewire it in the CLI:");
-    const sep = separator(report.platform);
-    const root = plugin.path.replace(report.platform === "win32" ? /[\\/]$/ : /\/$/, "");
-    out.push(`/statusline ${short(root)}${sep}hooks${sep}${hookName(report.platform)}`);
-  }
-  return out;
-}
-function dirname(filePath, platform) {
-  const cut = platform === "win32" ? Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")) : filePath.lastIndexOf("/");
-  if (cut < 0) {
-    return filePath;
-  }
-  return cut === 0 ? "/" : filePath.slice(0, cut);
-}
-function nerdFontLines(report) {
-  const out = [];
-  switch (report.nerdFont) {
-    case "found":
-      out.push(`found ${report.nerdFontMatches.slice(0, 2).join(", ")}`);
-      out.push("(heuristic: an installed font is not necessarily the one your terminal uses)");
-      break;
-    case "not-found":
-      out.push("none found in the system font directories \u2014 not a verdict:");
-      out.push("Ghostty, WezTerm and kitty ship their own glyph fallback, so read");
-      out.push("the probe below before installing anything");
-      break;
-    default:
-      out.push("could not scan (fc-list unavailable)");
-      break;
-  }
-  if (report.remoteSession && report.nerdFont !== "unknown") {
-    out.push("scanned on this host, which is not the one drawing the glyphs");
-  }
-  return out;
-}
-
-// src/main.ts
-var version = "0.1.17";
-var sameFrameRefreshBudgetMs = 2e3;
-var stdinTimeoutMs = 1e3;
-var consumedQuotaRefreshMs = 15 * 1e3;
-var untouchedQuotaRefreshMs = 30 * 1e3;
-function renderStatusline(input, cfg = defaultConfig(), cache = null) {
-  if (input.trim() === "") {
+function renderStatusline(input, cfg = defaultConfig(), now = /* @__PURE__ */ new Date()) {
+  if (Buffer.byteLength(input, "utf8") > maxStdinBytes) {
     return "agy-hud";
   }
-  let payload;
-  try {
-    payload = JSON.parse(input);
-  } catch {
+  const payload = parsePayloadObject(input);
+  if (payload === null) {
     return "agy-hud";
-  }
-  let branch2 = "";
-  if (cfg.showGitBranch) {
-    branch2 = gitBranchFromPayload(payload);
-    if (branch2 === "") {
-      branch2 = sanitizedBranch(payload.vcs?.branch ?? "");
-    }
-    if (branch2 === "" && shouldUseProcessCWD(payload.cwd ?? "")) {
-      branch2 = branch(".");
-    }
-    if (branch2 === "") {
-      branch2 = sanitizedBranch(process.env.AGY_HUD_GIT_BRANCH ?? "");
-    }
   }
   try {
     return render(payload, {
       config: cfg,
-      quota: cache,
-      gitBranch: branch2
+      now
     });
   } catch {
     return "agy-hud";
   }
 }
-function configPaths() {
-  const paths = [];
-  const explicit = process.env.AGY_HUD_CONFIG;
-  if (explicit) {
-    paths.push(explicit);
-  }
-  paths.push(...pluginConfigPaths());
-  const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) {
-    paths.push(import_node_path5.default.join(xdg, "agy-hud", "config.json"));
-  }
-  const home = import_node_os2.default.homedir();
-  if (home) {
-    paths.push(import_node_path5.default.join(home, ".config", "agy-hud", "config.json"));
-  }
-  return paths;
-}
-function pluginConfigPaths() {
-  const dir = import_node_path5.default.dirname(__filename);
-  return [import_node_path5.default.join(dir, "config.json"), import_node_path5.default.join(dir, "..", "config.json")];
-}
-function userConfigPath() {
-  const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) {
-    return import_node_path5.default.join(xdg, "agy-hud", "config.json");
-  }
-  const home = import_node_os2.default.homedir();
-  if (home) {
-    return import_node_path5.default.join(home, ".config", "agy-hud", "config.json");
-  }
-  return "";
-}
-function quotaCacheWritePath() {
-  const explicit = process.env.AGY_HUD_QUOTA_CACHE;
-  if (explicit) {
-    return explicit;
-  }
-  const xdg = process.env.XDG_CACHE_HOME;
-  if (xdg && import_node_path5.default.isAbsolute(xdg)) {
-    return import_node_path5.default.join(xdg, "agy-hud", "quota_cache.json");
-  }
-  const home = import_node_os2.default.homedir();
-  if (!home) {
-    return "";
-  }
-  return import_node_path5.default.join(home, ".cache", "agy-hud", "quota_cache.json");
-}
-function legacyQuotaCachePath() {
-  const home = import_node_os2.default.homedir();
-  if (!home) {
-    return "";
-  }
-  return import_node_path5.default.join(home, ".gemini", "antigravity-cli", "scratch", "agy-hud", "quota_cache.json");
-}
-function quotaCacheReadCandidates() {
-  if (process.env.AGY_HUD_QUOTA_CACHE) {
-    return [quotaCacheWritePath()];
-  }
-  const candidates = [quotaCacheWritePath(), legacyQuotaCachePath()];
-  return candidates.filter((candidate, index) => candidate !== "" && candidates.indexOf(candidate) === index);
-}
-function loadQuotaFromCandidates(candidates) {
-  let primaryUnloadable = false;
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index];
-    const [cache, ok] = load(candidate);
-    if (ok) {
-      return [cache, true, primaryUnloadable];
-    }
-    if (index === 0 && import_node_fs6.default.existsSync(candidate)) {
-      primaryUnloadable = true;
-    }
-  }
-  return [null, false, primaryUnloadable];
-}
-function gitBranchFromPayload(payload) {
-  const paths = [
-    payload.workspace?.current_dir ?? "",
-    payload.cwd ?? "",
-    payload.vcs?.root ?? "",
-    payload.workspace?.project_dir ?? ""
-  ];
-  for (const candidate of paths) {
-    if (!validGitCandidatePath(candidate)) {
-      continue;
-    }
-    const found = branch(candidate);
-    if (found !== "") {
-      return found;
-    }
-  }
-  return "";
-}
-function shouldUseProcessCWD(payloadCWD) {
-  if (payloadCWD.trim() === "") {
-    return true;
-  }
-  return import_node_path5.default.basename(process.cwd()) === import_node_path5.default.basename(payloadCWD);
-}
-function validGitCandidatePath(candidate) {
-  const trimmed = candidate.trim();
-  if (trimmed === "") {
-    return false;
-  }
-  try {
-    return import_node_fs6.default.statSync(trimmed).isDirectory();
-  } catch {
-    return false;
-  }
-}
-function sanitizedBranch(raw) {
-  raw = raw.trim();
-  if (raw === "" || raw.length > 80) {
-    return "";
-  }
-  for (const char of raw) {
-    const ok = char >= "a" && char <= "z" || char >= "A" && char <= "Z" || char >= "0" && char <= "9" || char === "/" || char === "-" || char === "_" || char === ".";
-    if (!ok) {
-      return "";
-    }
-  }
-  return raw;
-}
 function usage(write) {
-  write("usage: agy-hud [statusline|quota refresh|doctor [--json]|version]\n");
+  write("usage: agy-hud [statusline [flags]|doctor [--json]|version]\n");
 }
-function fcList() {
+function isCompleteJsonObjectBytes(buf) {
+  let decoded;
   try {
-    return (0, import_node_child_process3.execFileSync)("fc-list", [":", "family"], {
-      encoding: "utf8",
-      timeout: 3e3,
-      maxBuffer: 8 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"]
-    });
+    decoded = utf8Fatal.decode(buf);
   } catch {
-    return null;
+    return { complete: false, text: "" };
+  }
+  const text = decoded.trim();
+  if (!text.startsWith("{") || !text.endsWith("}")) {
+    return { complete: false, text: "" };
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { complete: true, text };
+    }
+    return { complete: true, text: "" };
+  } catch {
+    return { complete: false, text: "" };
   }
 }
-function agyPluginList() {
-  try {
-    return (0, import_node_child_process3.execFileSync)("agy", ["plugin", "list", "--json"], {
-      cwd: import_node_os2.default.tmpdir(),
-      windowsHide: true,
-      encoding: "utf8",
-      timeout: 5e3,
-      maxBuffer: 8 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-  } catch {
-    return null;
-  }
-}
-function doctorDepsFromEnv() {
-  return {
-    version,
-    nodeVersion: process.version,
-    platform: process.platform,
-    env: process.env,
-    homedir: import_node_os2.default.homedir(),
-    configPaths: configPaths(),
-    userConfigPath: userConfigPath(),
-    pluginConfigPaths: pluginConfigPaths(),
-    readFile: (filePath) => {
-      try {
-        return import_node_fs6.default.readFileSync(filePath, "utf8");
-      } catch {
-        return null;
+function readStdinBounded(stdin, timeoutMs, maxBytes = maxStdinBytes) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let totalBytes = 0;
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      stdin.removeListener("data", onData);
+      stdin.removeListener("end", onEnd);
+      stdin.removeListener("error", onError);
+      stdin.on("error", () => {
+      });
+      stdin.pause();
+      stdin.destroy?.();
+    };
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const decodeFinal = (timeout) => {
+      if (totalBytes === 0) {
+        return { ok: false, text: "", reason: timeout ? "timeout" : "empty" };
       }
-    },
-    listDir: (dirPath) => {
+      const combined = Buffer.concat(chunks);
+      let text;
       try {
-        return import_node_fs6.default.readdirSync(dirPath);
+        text = utf8Fatal.decode(combined);
       } catch {
-        return [];
+        return { ok: false, text: "", reason: "invalid_utf8" };
       }
-    },
-    fcList,
-    pluginList: agyPluginList
-  };
+      if (text.trim() === "") {
+        return { ok: false, text: "", reason: timeout ? "timeout" : "empty" };
+      }
+      return { ok: true, text };
+    };
+    const onData = (chunk) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      totalBytes += buf.length;
+      if (totalBytes > maxBytes) {
+        settle({ ok: false, text: "", reason: "too_large" });
+        return;
+      }
+      chunks.push(buf);
+      const probe = isCompleteJsonObjectBytes(Buffer.concat(chunks));
+      if (probe.complete) {
+        settle(probe.text !== "" ? { ok: true, text: probe.text } : { ok: false, text: "", reason: "empty" });
+      }
+    };
+    const onEnd = () => settle(decodeFinal(false));
+    const onError = () => settle(decodeFinal(false));
+    const timer = setTimeout(() => settle(decodeFinal(true)), timeoutMs);
+    stdin.on("data", onData);
+    stdin.on("end", onEnd);
+    stdin.on("error", onError);
+  });
 }
 async function runCli(args, deps = {}) {
   const stdout = deps.stdout ?? ((chunk) => {
@@ -2011,556 +1251,53 @@ async function runCli(args, deps = {}) {
   const stderr = deps.stderr ?? ((chunk) => {
     process.stderr.write(chunk);
   });
-  const command = args[0] ?? "statusline";
-  if (command === "version" || command === "--version" || command === "-v") {
+  const first = args[0] ?? "statusline";
+  if (first === "version" || first === "--version" || first === "-v") {
     stdout(`${version}
 `);
     return 0;
   }
-  if (command === "statusline") {
-    if (process.env.AGY_HUD_NESTED === "1") {
-      await readStdin(deps.stdin ?? process.stdin, deps.stdinTimeoutMs ?? stdinTimeoutMs);
-      return 0;
-    }
-    const cfg = loadFromPaths(configPaths());
-    const raw = await readStdin(deps.stdin ?? process.stdin, deps.stdinTimeoutMs ?? stdinTimeoutMs);
-    const payload = parsePayload(raw);
-    const cachePath = quotaCacheWritePath();
-    const [cache, ok, primaryUnloadable] = loadQuotaFromCandidates(quotaCacheReadCandidates());
-    const cliVersion = safeCliVersion(payload?.version);
-    const probeRejected = authRejectedFor(cachePath, cliVersion);
-    const [displayCache, refreshed] = await refreshQuotaBeforeRenderIfNeeded(
-      cachePath,
-      ok ? cache : null,
-      payload,
-      deps.refreshQuota ?? ((cachePath2, signal) => refreshQuota(cachePath2, void 0, signal)),
-      cliVersion,
-      probeRejected,
-      deps.sameFrameRefreshBudgetMs ?? sameFrameRefreshBudgetMs
-    );
-    triggerBackgroundRefreshIfNeeded(cachePath, displayCache, payload, primaryUnloadable && !refreshed, cliVersion, probeRejected);
-    stdout(`${renderStatusline(raw, cfg, displayCache)}
-`);
+  if (first === "help" || first === "--help" || first === "-h") {
+    usage(stderr);
     return 0;
   }
-  if (command === "quota") {
-    if (args[1] === "refresh") {
-      const cachePath = quotaCacheWritePath();
-      const lockPath = cachePath + ".lock";
-      const flags = refreshFlags(args.slice(2));
-      const cliVersion = flags.cliVersion;
-      try {
-        let result = null;
-        if (!authRejectedFor(cachePath, cliVersion)) {
-          result = await (deps.refreshQuota ?? refreshQuota)(cachePath);
-          recordAuthRejection(cachePath, result, cliVersion);
-        }
-        const usageNeeded = result === null || !result.ok && result.authRejected === true;
-        if (usageNeeded && (!flags.background || cliVersion !== "")) {
-          const skip = flags.background ? usageSkipReason(cachePath, lockPath, flags.lockToken, /* @__PURE__ */ new Date()) : null;
-          if (skip !== null) {
-            result = skip;
-          } else {
-            const outcome = await (deps.usageQuota ?? (() => queryUsage()))();
-            result = outcome.ok ? saveUsageCache(cachePath, outcome.quota) : { ok: false, message: outcome.message };
-            recordUsageOutcome(cachePath, cliVersion, result.ok);
-          }
-        }
-        result ??= { ok: false, message: "No quota source was tried." };
-        stderr(`[quota_probe] ${result.message}
-`);
-        if (result.ok && result.summary) {
-          stdout(`${result.summary}
-`);
-        }
-        return result.ok ? 0 : 2;
-      } catch (error) {
-        stderr(`[quota_probe] ${error instanceof Error ? error.message : String(error)}
-`);
-        return 2;
-      } finally {
-        try {
-          if (flags.lockToken !== "" && import_node_fs6.default.readFileSync(lockPath, "utf8") === flags.lockToken) {
-            import_node_fs6.default.unlinkSync(lockPath);
-          }
-        } catch {
-        }
-      }
-    }
-    usage(stderr);
-    return 2;
-  }
-  if (command === "doctor") {
+  if (first === "doctor") {
     const rest = args.slice(1);
     const json = rest.length === 1 && rest[0] === "--json";
     if (rest.length > 0 && !json) {
       usage(stderr);
       return 2;
     }
-    const report = collectDoctorReport({ ...doctorDepsFromEnv(), ...deps.doctorDeps });
+    const report = collectPassiveDoctorReport(version);
     stdout(json ? `${JSON.stringify(report, null, 2)}
-` : formatDoctorReport(report));
+` : formatPassiveDoctorReport(report));
     return 0;
   }
-  if (command === "help" || command === "--help" || command === "-h") {
-    usage(stderr);
+  if (first === "statusline" || first.startsWith("--")) {
+    const flagArgs = first === "statusline" ? args.slice(1) : args;
+    const parsedFlags = parseCliConfig(flagArgs);
+    if (parsedFlags.error) {
+      stderr(`agy-hud: ${parsedFlags.error}
+`);
+      return 2;
+    }
+    const timeout = deps.stdinTimeoutMs ?? parsedFlags.config.stdinTimeoutMs ?? stdinTimeoutMs;
+    const maxBytes = deps.maxStdinBytes ?? maxStdinBytes;
+    if (process.env.AGY_HUD_NESTED === "1") {
+      await readStdinBounded(deps.stdin ?? process.stdin, timeout, maxBytes);
+      return 0;
+    }
+    const input = await readStdinBounded(deps.stdin ?? process.stdin, timeout, maxBytes);
+    if (!input.ok) {
+      stdout("agy-hud\n");
+      return 0;
+    }
+    stdout(`${renderStatusline(input.text, parsedFlags.config, deps.now ?? /* @__PURE__ */ new Date())}
+`);
     return 0;
   }
   usage(stderr);
   return 2;
-}
-function readStdin(stdin, timeoutMs) {
-  return new Promise((resolve) => {
-    let raw = "";
-    let settled = false;
-    const finish = () => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      stdin.removeListener("data", onData);
-      stdin.removeListener("end", finish);
-      stdin.removeListener("error", finish);
-      stdin.on("error", () => {
-      });
-      stdin.pause();
-      stdin.destroy?.();
-      resolve(raw);
-    };
-    const onData = (chunk) => {
-      raw += chunk;
-      if (isCompleteJsonObject(raw)) {
-        finish();
-      }
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    stdin.setEncoding("utf8");
-    stdin.on("data", onData);
-    stdin.on("end", finish);
-    stdin.on("error", finish);
-  });
-}
-function isCompleteJsonObject(raw) {
-  const text = raw.trim();
-  if (!text.startsWith("{") || !text.endsWith("}")) {
-    return false;
-  }
-  try {
-    JSON.parse(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function refreshQuotaBeforeRenderIfNeeded(cachePath, cache, payload, refresh, cliVersion, probeRejected, budgetMs) {
-  if (probeRejected || !shouldRefreshBeforeRender(cachePath, payload, /* @__PURE__ */ new Date())) {
-    return [cache, false];
-  }
-  const controller = new AbortController();
-  let timer;
-  try {
-    const deadline = new Promise((resolve) => {
-      timer = setTimeout(() => {
-        resolve(null);
-        controller.abort();
-      }, budgetMs);
-    });
-    const result = await Promise.race([refresh(cachePath, controller.signal), deadline]);
-    if (result === null || controller.signal.aborted) {
-      return [cache, false];
-    }
-    recordAuthRejection(cachePath, result, cliVersion);
-    if (!result.ok) {
-      return [cache, false];
-    }
-    const [freshCache, ok] = load(cachePath);
-    if (!ok) {
-      return [cache, false];
-    }
-    saveStatuslineRefreshState(
-      refreshStatePath(cachePath),
-      mergeStatuslineRefreshState(null, payload, true, /* @__PURE__ */ new Date())
-    );
-    return [freshCache, true];
-  } catch {
-    return [cache, false];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function shouldRefreshBeforeRender(cachePath, payload, now) {
-  if (cachePath === "" || !payload) {
-    return false;
-  }
-  const prevState = loadRefreshStateWithFallback(quotaCacheReadCandidates());
-  const prevAgentState = prevState?.agentState ?? "";
-  const agentState = normalizeAgentState(payload.agent_state);
-  if (agentState !== "idle" || prevAgentState === "" || prevAgentState === "idle") {
-    return false;
-  }
-  if (prevState?.lastActivityAt) {
-    const last = new Date(prevState.lastActivityAt);
-    if (!Number.isNaN(last.getTime()) && now.getTime() - last.getTime() < 5 * 1e3) {
-      return false;
-    }
-  }
-  return true;
-}
-function triggerBackgroundRefreshIfNeeded(cachePath, cache, payload = null, repairRefresh = false, cliVersion = "", probeRejected = false) {
-  const now = /* @__PURE__ */ new Date();
-  const statePath = refreshStatePath(cachePath);
-  const prevState = loadRefreshStateWithFallback(quotaCacheReadCandidates());
-  const activityRefresh = shouldTriggerActivityRefresh(cache, payload, prevState, now);
-  const nextState = mergeStatuslineRefreshState(prevState, payload, activityRefresh, now);
-  saveStatuslineRefreshState(statePath, nextState);
-  const lockPath = cachePath + ".lock";
-  const lockToken = (0, import_node_crypto.randomUUID)();
-  if (probeRejected) {
-    if (usageRefreshDue(cache, payload, prevState, readRejectionMarker(cachePath), now) && takeUsageLock(lockPath, lockToken, now)) {
-      spawnQuotaRefresh(cliVersion, lockToken);
-    }
-    return;
-  }
-  if (!quotaCacheNeedsRefresh(cache, now) && !activityRefresh && !repairRefresh) {
-    return;
-  }
-  try {
-    if (import_node_fs6.default.existsSync(lockPath)) {
-      const stat = import_node_fs6.default.statSync(lockPath);
-      const minLockMs = activityRefresh ? 5 * 1e3 : 30 * 1e3;
-      if (now.getTime() - stat.mtimeMs < minLockMs) {
-        return;
-      }
-    }
-    import_node_fs6.default.writeFileSync(lockPath, lockToken, { encoding: "utf8", mode: 384 });
-    spawnQuotaRefresh(cliVersion, lockToken);
-  } catch {
-  }
-}
-function spawnQuotaRefresh(cliVersion, lockToken) {
-  try {
-    const args = [
-      __filename,
-      "quota",
-      "refresh",
-      ...cliVersion ? ["--cli-version", cliVersion] : [],
-      "--background",
-      "--lock-token",
-      lockToken
-    ];
-    const child = (0, import_node_child_process3.spawn)(process.argv[0], args, {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    });
-    child.unref();
-  } catch {
-  }
-}
-var usageActiveFloorMs = 60 * 1e3;
-var usageIdleFloorMs = 5 * 60 * 1e3;
-var usageLockStaleMs = 120 * 1e3;
-function refreshFlags(args) {
-  const flags = { cliVersion: "", background: false, lockToken: "" };
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === "--cli-version") {
-      flags.cliVersion = safeCliVersion(args[index + 1]);
-      index += 1;
-    } else if (args[index] === "--lock-token") {
-      const token = args[index + 1] ?? "";
-      flags.lockToken = /^[0-9A-Za-z-]{1,64}$/.test(token) ? token : "";
-      index += 1;
-    } else if (args[index] === "--background") {
-      flags.background = true;
-    }
-  }
-  return flags;
-}
-function usageSkipReason(cachePath, lockPath, lockToken, now) {
-  let owner = "";
-  try {
-    owner = import_node_fs6.default.readFileSync(lockPath, "utf8");
-  } catch {
-  }
-  if (lockToken === "" || owner !== lockToken) {
-    return { ok: false, message: "Skipped agy /usage: this refresh does not hold the lock." };
-  }
-  const retryAt = Date.parse(readRejectionMarker(cachePath)?.usageRetryAt ?? "");
-  if (Number.isFinite(retryAt) && retryAt > now.getTime()) {
-    return { ok: false, message: "Skipped agy /usage: backing off after a failure." };
-  }
-  const [cache, ok] = load(cachePath);
-  const cacheTime = Date.parse(cache?.timestamp ?? "");
-  if (ok && cache?.source === "usage" && Number.isFinite(cacheTime) && now.getTime() - cacheTime < usageActiveFloorMs) {
-    return { ok: true, message: "Skipped agy /usage: the cached quota is fresh." };
-  }
-  return null;
-}
-function usageRefreshDue(cache, payload, prevState, marker, now) {
-  const retryAt = Date.parse(marker?.usageRetryAt ?? "");
-  if (Number.isFinite(retryAt) && retryAt > now.getTime()) {
-    return false;
-  }
-  const agentState = normalizeAgentState(payload?.agent_state);
-  const prevAgentState = prevState?.agentState ?? "";
-  const isActive = (value) => value !== "" && value !== "idle";
-  const active = isActive(agentState) || isActive(prevAgentState);
-  const cacheTime = Date.parse(cache?.timestamp ?? "");
-  const age = Number.isFinite(cacheTime) ? now.getTime() - cacheTime : Infinity;
-  return age > (active ? usageActiveFloorMs : usageIdleFloorMs);
-}
-function takeUsageLock(lockPath, token, now) {
-  try {
-    import_node_fs6.default.mkdirSync(import_node_path5.default.dirname(lockPath), { recursive: true, mode: 448 });
-  } catch {
-    return false;
-  }
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      import_node_fs6.default.writeFileSync(lockPath, token, { encoding: "utf8", flag: "wx", mode: 384 });
-      return true;
-    } catch (error) {
-      if (error.code !== "EEXIST") {
-        return false;
-      }
-      try {
-        if (now.getTime() - import_node_fs6.default.statSync(lockPath).mtimeMs <= usageLockStaleMs) {
-          return false;
-        }
-        const aside = `${lockPath}.stale-${token}`;
-        import_node_fs6.default.renameSync(lockPath, aside);
-        import_node_fs6.default.rmSync(aside, { force: true });
-      } catch (takeoverError) {
-        if (takeoverError.code !== "ENOENT") {
-          return false;
-        }
-      }
-    }
-  }
-  return false;
-}
-function saveUsageCache(cachePath, quota) {
-  try {
-    import_node_fs6.default.mkdirSync(import_node_path5.default.dirname(cachePath), { recursive: true, mode: 448 });
-    const cache = { timestamp: (/* @__PURE__ */ new Date()).toISOString(), source: "usage", models: {}, quota };
-    import_node_fs6.default.writeFileSync(cachePath, `${JSON.stringify(cache, null, 2)}
-`, { encoding: "utf8", mode: 384 });
-    import_node_fs6.default.chmodSync(cachePath, 384);
-  } catch (error) {
-    return { ok: false, message: `Could not write the quota cache: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  const summary = Object.entries(quota).map(([key, bucket]) => `${key} ${Math.round((bucket.remaining_fraction ?? 0) * 100)}% left`).join(", ");
-  return { ok: true, message: `Cached quota from agy /usage to ${cachePath}`, cachePath, summary };
-}
-function quotaCacheNeedsRefresh(cache, now = /* @__PURE__ */ new Date()) {
-  if (!cache || !cache.timestamp) {
-    return true;
-  }
-  try {
-    const cacheTime = new Date(cache.timestamp);
-    if (Number.isNaN(cacheTime.getTime())) {
-      return true;
-    }
-    const interval = cacheLooksUntouched(cache) ? untouchedQuotaRefreshMs : consumedQuotaRefreshMs;
-    if (now.getTime() - cacheTime.getTime() > interval) {
-      return true;
-    }
-  } catch {
-    return true;
-  }
-  return false;
-}
-function parsePayload(input) {
-  try {
-    return JSON.parse(input);
-  } catch {
-    return null;
-  }
-}
-function safeCliVersion(raw) {
-  return typeof raw === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/.test(raw) ? raw : "";
-}
-function authRejectedPath(cachePath) {
-  return cachePath === "" ? "" : `${cachePath}.auth-rejected.json`;
-}
-function readRejectionMarker(cachePath) {
-  const markerPath = authRejectedPath(cachePath);
-  if (markerPath === "") {
-    return null;
-  }
-  try {
-    const marker = JSON.parse(import_node_fs6.default.readFileSync(markerPath, "utf8"));
-    if (typeof marker.cliVersion !== "string") {
-      return null;
-    }
-    return {
-      cliVersion: marker.cliVersion,
-      rejectedAt: typeof marker.rejectedAt === "string" ? marker.rejectedAt : "",
-      usageFailures: Number.isInteger(marker.usageFailures) && (marker.usageFailures ?? 0) > 0 ? marker.usageFailures : void 0,
-      usageRetryAt: typeof marker.usageRetryAt === "string" ? marker.usageRetryAt : void 0
-    };
-  } catch {
-    return null;
-  }
-}
-function writeRejectionMarker(cachePath, marker) {
-  const markerPath = authRejectedPath(cachePath);
-  import_node_fs6.default.mkdirSync(import_node_path5.default.dirname(markerPath), { recursive: true, mode: 448 });
-  import_node_fs6.default.writeFileSync(markerPath, `${JSON.stringify(marker)}
-`, { encoding: "utf8", mode: 384 });
-}
-function authRejectedFor(cachePath, cliVersion) {
-  return cliVersion !== "" && readRejectionMarker(cachePath)?.cliVersion === cliVersion;
-}
-function recordAuthRejection(cachePath, result, cliVersion) {
-  if (authRejectedPath(cachePath) === "") {
-    return;
-  }
-  try {
-    if (result.ok) {
-      import_node_fs6.default.rmSync(authRejectedPath(cachePath), { force: true });
-    } else if (result.authRejected && cliVersion !== "" && !authRejectedFor(cachePath, cliVersion)) {
-      writeRejectionMarker(cachePath, { cliVersion, rejectedAt: (/* @__PURE__ */ new Date()).toISOString() });
-    }
-  } catch {
-  }
-}
-function recordUsageOutcome(cachePath, cliVersion, ok) {
-  const marker = readRejectionMarker(cachePath);
-  if (!marker || cliVersion === "" || marker.cliVersion !== cliVersion) {
-    return;
-  }
-  try {
-    if (ok) {
-      writeRejectionMarker(cachePath, { cliVersion: marker.cliVersion, rejectedAt: marker.rejectedAt });
-      return;
-    }
-    const failures = (marker.usageFailures ?? 0) + 1;
-    const delayMs = Math.min(60 * 1e3 * 2 ** (failures - 1), 10 * 60 * 1e3);
-    writeRejectionMarker(cachePath, { ...marker, usageFailures: failures, usageRetryAt: new Date(Date.now() + delayMs).toISOString() });
-  } catch {
-  }
-}
-function refreshStatePath(cachePath) {
-  if (cachePath === "") {
-    return "";
-  }
-  return `${cachePath}.statusline.json`;
-}
-function loadRefreshStateWithFallback(candidates) {
-  for (const candidate of candidates) {
-    const statePath = refreshStatePath(candidate);
-    if (statePath === "") {
-      continue;
-    }
-    if (import_node_fs6.default.existsSync(statePath)) {
-      return loadStatuslineRefreshState(statePath);
-    }
-  }
-  return null;
-}
-function loadStatuslineRefreshState(statePath) {
-  if (statePath === "") {
-    return null;
-  }
-  try {
-    const raw = import_node_fs6.default.readFileSync(statePath, "utf8");
-    const parsed = JSON.parse(raw);
-    return {
-      conversationId: typeof parsed.conversationId === "string" ? parsed.conversationId : "",
-      agentState: typeof parsed.agentState === "string" ? parsed.agentState : "",
-      lastActivityAt: typeof parsed.lastActivityAt === "string" ? parsed.lastActivityAt : void 0
-    };
-  } catch {
-    return null;
-  }
-}
-function saveStatuslineRefreshState(statePath, state2) {
-  if (statePath === "") {
-    return;
-  }
-  try {
-    import_node_fs6.default.mkdirSync(import_node_path5.default.dirname(statePath), { recursive: true, mode: 448 });
-    import_node_fs6.default.writeFileSync(statePath, `${JSON.stringify(state2, null, 2)}
-`, { encoding: "utf8", mode: 384 });
-  } catch {
-  }
-}
-function mergeStatuslineRefreshState(prevState, payload, activityRefresh, now) {
-  const next = {
-    conversationId: prevState?.conversationId ?? "",
-    agentState: prevState?.agentState ?? "",
-    lastActivityAt: prevState?.lastActivityAt
-  };
-  if (payload) {
-    next.conversationId = (payload.conversation_id ?? "").trim();
-    next.agentState = normalizeAgentState(payload.agent_state);
-  }
-  if (activityRefresh) {
-    next.lastActivityAt = now.toISOString();
-  }
-  return next;
-}
-function shouldTriggerActivityRefresh(cache, payload, prevState, now) {
-  if (!payload) {
-    return false;
-  }
-  const conversationId = (payload.conversation_id ?? "").trim();
-  const agentState = normalizeAgentState(payload.agent_state);
-  const prevConversationId = prevState?.conversationId ?? "";
-  const prevAgentState = prevState?.agentState ?? "";
-  const conversationChanged = conversationId !== "" && conversationId !== prevConversationId;
-  const becameActive = agentState !== "" && agentState !== "idle" && agentState !== prevAgentState;
-  const settledAfterActive = agentState === "idle" && prevAgentState !== "" && prevAgentState !== "idle";
-  if (settledAfterActive) {
-    return true;
-  }
-  if (!cacheLooksUntouched(cache) && !activeModelQuotaLooksUntouched(cache, payload)) {
-    return false;
-  }
-  if (!conversationChanged && !becameActive && !settledAfterActive) {
-    return false;
-  }
-  if (prevState?.lastActivityAt) {
-    const last = new Date(prevState.lastActivityAt);
-    if (!Number.isNaN(last.getTime()) && now.getTime() - last.getTime() < 5 * 1e3) {
-      return false;
-    }
-  }
-  return true;
-}
-function activeModelQuotaLooksUntouched(cache, payload) {
-  if (!cache) {
-    return false;
-  }
-  const model = payload.model?.display_name || payload.model?.id || "";
-  if (model === "") {
-    return false;
-  }
-  const [quota, ok] = matchModel(cache, model);
-  if (!ok || quota === null) {
-    return true;
-  }
-  return quota.remainingFraction >= 1;
-}
-function normalizeAgentState(raw) {
-  return (raw ?? "").trim().toLowerCase();
-}
-function cacheLooksUntouched(cache) {
-  if (!cache || !cache.models) {
-    return false;
-  }
-  const quotas = Object.values(cache.models);
-  if (quotas.length === 0) {
-    return true;
-  }
-  for (const quota of quotas) {
-    if (quota.remainingFraction < 1) {
-      return false;
-    }
-  }
-  return true;
 }
 if (require.main === module) {
   runCli(process.argv.slice(2)).then((code) => {
@@ -2569,16 +1306,11 @@ if (require.main === module) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  configPaths,
-  doctorDepsFromEnv,
-  pluginConfigPaths,
-  quotaCacheNeedsRefresh,
-  quotaCacheReadCandidates,
-  quotaCacheWritePath,
+  maxStdinBytes,
+  parsePayloadObject,
+  readStdinBounded,
   renderStatusline,
   runCli,
-  sameFrameRefreshBudgetMs,
   stdinTimeoutMs,
-  userConfigPath,
   version
 });

@@ -391,12 +391,12 @@ test("status-line.sh is exercised by at least one shell", { skip: process.platfo
   assert.ok(shells.length > 0);
 });
 
-// The release archive and the READMEs' local staging list their files by hand, so a hook missing
+// The release archive and README local staging list their files by hand, so a hook missing
 // from any of them ships nowhere: hooks/status-line.cmd was once left out of the release archive.
-test("every hook is copied into hooks/ by the release workflow and both READMEs' staging steps", () => {
+test("every hook is copied into hooks/ by the release workflow and README staging steps", () => {
   const hooks = fs.readdirSync(path.join(root, "hooks"));
   assert.ok(hooks.includes("status-line.sh") && hooks.includes("status-line.cmd"));
-  for (const file of [".github/workflows/release.yml", "README.md", "README.zh-CN.md"]) {
+  for (const file of [".github/workflows/release.yml", "README.md"]) {
     // A copy counts only when its last argument, the destination, is hooks/ in the staged plugin root.
     const copies = fs.readFileSync(path.join(root, file), "utf8").split("\n")
       .filter(line => /^\s*cp\s/.test(line) && /\s"?(\$stage|release\/\$\{package\})\/hooks\/"?\s*$/.test(line));
@@ -406,10 +406,10 @@ test("every hook is copied into hooks/ by the release workflow and both READMEs'
   }
 });
 
-// The READMEs also list the archive's contents for readers, by hand.
-test("both READMEs list every hook in the release archive's contents", () => {
+// The README also lists the archive's contents for readers, by hand.
+test("README lists every hook in the release archive's contents", () => {
   const hooks = fs.readdirSync(path.join(root, "hooks"));
-  for (const [file, heading] of [["README.md", "## Expected Release Install Shape"], ["README.zh-CN.md", "## Release 归档内容"]]) {
+  for (const [file, heading] of [["README.md", "## Expected Release Install Shape"]]) {
     const text = fs.readFileSync(path.join(root, file), "utf8");
     const section = text.slice(text.indexOf(heading), text.indexOf("\n## ", text.indexOf(heading) + heading.length));
     for (const name of hooks) {
@@ -487,4 +487,29 @@ test("status-line.cmd is checked out with CRLF line endings", () => {
   const text = fs.readFileSync(path.join(root, "hooks", "status-line.cmd"), "utf8");
   assert.ok(text.includes("\r\n"));
   assert.doesNotMatch(text, /[^\r]\n/);
+});
+
+test("Windows status-line.cmd ignores malicious node.exe and node.bat in current working directory", { skip: process.platform !== "win32" }, () => {
+  const cmdHook = path.join(root, "hooks", "status-line.cmd");
+  const tempCwd = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hud-win-cwd-"));
+  const marker = path.join(tempCwd, "pwned.txt");
+  const whoami = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe");
+  assert.ok(fs.existsSync(whoami), "whoami.exe must exist to stand in as decoy node.exe");
+  fs.copyFileSync(whoami, path.join(tempCwd, "node.exe"));
+  fs.writeFileSync(path.join(tempCwd, "node.bat"), `@echo off\r\necho pwned > "${marker}"\r\nexit /b 99\r\n`, "utf8");
+  fs.writeFileSync(path.join(tempCwd, "node.cmd"), `@echo off\r\necho pwned > "${marker}"\r\nexit /b 99\r\n`, "utf8");
+
+  const payload = JSON.stringify({ model: { display_name: "Gemini 3.5 Flash" }, terminal_width: 100 });
+
+  for (const pathPrefix of ["", `.;${tempCwd};`]) {
+    const result = spawnSync(process.env.ComSpec ?? "cmd.exe", ["/c", cmdHook], {
+      cwd: tempCwd,
+      encoding: "utf8",
+      input: payload,
+      env: { ...process.env, PATH: `${pathPrefix}${process.env.PATH ?? ""}` }
+    });
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+    assert.equal(fs.existsSync(marker), false, "decoy node.bat/node.cmd must never execute");
+    assert.match(result.stdout, /3\.5 Flash/);
+  }
 });

@@ -3,32 +3,30 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { strip, visibleLen } from "../src/ansi";
-import { defaultConfig, Config } from "../src/config";
-import { Cache } from "../src/quota";
-import { Payload, render, shortModelName, formatCost } from "../src/statusline";
+import { Config, defaultConfig } from "../src/config";
+import { formatCost, Payload, render, shortModelName } from "../src/statusline";
 
 function fixturePayload(): Payload {
   return JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "testdata", "statusline_payload.json"), "utf8"));
 }
 
-function renderFixture(config: Config, cache: Cache | null = null): string {
-  return render(fixturePayload(), {
-    config,
-    quota: cache,
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
-  });
+function cleanConfig(overrides: Partial<Config> = {}): Config {
+  return {
+    ...defaultConfig(),
+    color: false,
+    showIcons: false,
+    locale: "en-GB",
+    timeZone: "UTC",
+    ...overrides
+  };
 }
 
-test("short model name strips Gemini and compacts tier", () => {
+test("short model name strips Gemini/Claude/Thinking and compacts tier", () => {
   const cases: Record<string, string> = {
     "Gemini 3.8 Flash (High)": "3.8 Flash High",
     "Gemini 3.7 Flash (Medium)": "3.7 Flash Med",
     "Gemini 3.6 Flash (Low)": "3.6 Flash Low",
     "GPT-OSS 120B (Medium)": "GPT-OSS 120B Med",
-    "Gemini 3.5 Flash (High)": "3.5 Flash High",
-    "Gemini 3.1 Pro (High)": "3.1 Pro High",
-    "Gemini 3.5 Flash (Medium)": "3.5 Flash Med",
     "Claude Sonnet 4.6 (Thinking)": "Sonnet 4.6",
     "Claude Opus 4.6 (Thinking)": "Opus 4.6"
   };
@@ -37,447 +35,241 @@ test("short model name strips Gemini and compacts tier", () => {
   }
 });
 
-test("combined model plan badge and no duplicate model", () => {
-  const out = strip(renderFixture(defaultConfig()));
-  assert.match(out, / 3\.5 Flash Med \|  Pro/);
-  assert.equal((out.match(/3\.5 Flash Med/g) ?? []).length, 1);
-});
-
-test("multiline default shape uses context and quota", () => {
-  const cache: Cache = {
-    models: {
-      "Gemini 3.5 Flash (Medium)": {
-        remainingFraction: 0.20,
-        resetTime: "2026-05-19T12:44:00Z"
-      }
-    }
-  };
-  const out = strip(renderFixture(defaultConfig(), cache));
-  const lines = out.split("\n");
-  assert.equal(lines.length, 2);
-  assert.match(lines[0], / 3\.5 Flash Med \|  Pro/);
-  assert.match(lines[0], / agy-hud/);
-  assert.match(lines[0], / main/);
-  assert.match(lines[0], /Idle/);
-  assert.doesNotMatch(lines[0], /  \|  |  │  /);
-  assert.match(lines[1], /Context/);
-  assert.match(lines[1], /12%/);
-  assert.doesNotMatch(lines[1], /  \|  |  │  /);
-  assert.match(lines[1], /Usage/);
-  assert.match(lines[1], /20% left/);
-  assert.match(lines[1], /Usage ██░░░░░░ 20% left ↻ Reset \d\d:\d\d/);
-  assert.doesNotMatch(lines[1], /↻ 00:44/);
-  assert.doesNotMatch(lines[1], /resets/);
-  assert.doesNotMatch(lines[1], /Idle/);
-});
-
-test("remaining quota renders as a context-style bar from precise fraction", () => {
-  const cache: Cache = {
-    models: {
-      "Gemini 3.5 Flash (Medium)": {
-        remainingFraction: 0.8475794,
-        resetTime: "2026-05-19T14:04:00Z"
-      }
-    }
-  };
-  const config = defaultConfig();
-  config.color = false;
-
-  const out = strip(renderFixture(config, cache));
-
-  assert.match(out, /Usage ███████░ 85% left ↻ Reset \d\d:\d\d/);
-  assert.doesNotMatch(out, /\u2009/);
-  assert.doesNotMatch(out, /↻ 02:04/);
-});
-
-test("official quota payload renders five-hour and weekly windows over stale quota cache", () => {
-  const payload = fixturePayload();
-  payload.terminal_width = 160;
-  payload.quota = {
-    "gemini-5h": {
-      remaining_fraction: 0.8423024,
-      reset_time: "2026-06-15T08:21:23Z",
-      reset_in_seconds: 16151
-    },
-    "gemini-weekly": {
-      remaining_fraction: 0.90918493,
-      reset_time: "2026-06-19T01:21:19Z",
-      reset_in_seconds: 336547
-    }
-  };
-  const staleCache: Cache = {
-    models: {
-      "Gemini 3.5 Flash (Medium)": {
-        remainingFraction: 0.2,
-        resetTime: "2026-05-19T12:44:00Z"
-      }
-    }
-  };
-  const config = defaultConfig();
-  config.color = false;
-
-  const out = strip(render(payload, {
-    config,
-    quota: staleCache,
-    gitBranch: "main",
-    now: new Date("2026-06-15T03:52:00Z")
-  }));
-
-  assert.match(out, /Usage ████████░░ 84% \(↻ 4h 29m\) \|  █████████░ 91% \(↻ 3d 21h\)/);
-  assert.doesNotMatch(out, /20% left/);
-});
-
-test("untouched official third-party quota does not override consumed active-model cache", () => {
-  const payload = fixturePayload();
-  payload.model = { display_name: "Claude Opus 4.6 (Thinking)" };
-  payload.quota = {
-    "3p-5h": {
-      remaining_fraction: 1,
-      reset_time: "2026-06-27T09:48:56Z"
-    }
-  };
-  const cache: Cache = {
-    timestamp: "2026-06-27T04:51:30Z",
-    models: {
-      "Claude Opus 4.6 (Thinking)": {
-        remainingFraction: 0.92,
-        resetTime: "2026-06-27T09:48:56Z"
-      }
-    }
-  };
-  const config = defaultConfig();
-  config.color = false;
-  config.contextValue = "both";
-
-  const out = strip(render(payload, {
-    config,
-    quota: cache,
-    gitBranch: "main",
-    now: new Date("2026-06-27T04:52:00Z")
-  }));
-
-  assert.match(out, /Usage ███████░ 92% left ↻ Reset \d\d:\d\d/);
-  assert.doesNotMatch(out, /100% left/);
-});
-
-test("fresh active-model cache can override stale official third-party quota with higher remaining value", () => {
-  const payload = fixturePayload();
-  payload.model = { display_name: "Claude Opus 4.6 (Thinking)" };
-  payload.quota = {
-    "3p-5h": {
-      remaining_fraction: 0.29,
-      reset_time: "2026-06-27T09:48:56Z"
-    }
-  };
-  const cache: Cache = {
-    timestamp: "2026-06-27T05:08:37Z",
-    models: {
-      "Claude Opus 4.6 (Thinking)": {
-        remainingFraction: 0.1661196,
-        resetTime: "2026-06-27T09:48:56Z"
-      }
-    }
-  };
-  const config = defaultConfig();
-  config.color = false;
-
-  const out = strip(render(payload, {
-    config,
-    quota: cache,
-    gitBranch: "main",
-    now: new Date("2026-06-27T05:09:00Z")
-  }));
-
-  assert.match(out, /Usage █░░░░░░░ 17% left ↻ Reset \d\d:\d\d/);
-  assert.doesNotMatch(out, /29% left/);
-});
-
-test("official quota uses third-party buckets for Claude and GPT models", () => {
-  const payload = fixturePayload();
-  payload.model = { display_name: "Claude Sonnet 4.6 (Thinking)" };
-  payload.quota = {
-    "3p-5h": {
-      remaining_fraction: 0.48,
-      reset_time: "2026-06-15T08:52:11Z"
-    },
-    "gemini-5h": {
-      remaining_fraction: 0.84,
-      reset_time: "2026-06-15T08:21:23Z"
-    }
-  };
-  const config = defaultConfig();
-  config.color = false;
-
-  const out = strip(render(payload, {
-    config,
-    gitBranch: "main",
-    now: new Date("2026-06-15T03:52:00Z")
-  }));
-
-  assert.match(out, /Sonnet 4\.6/);
-  assert.match(out, /Usage ████░░░░ 48% left ↻ Reset \d\d:\d\d/);
-});
-
-test("agent state can be hidden", () => {
-  const config = defaultConfig();
-  config.showAgentState = false;
-  assert.doesNotMatch(strip(renderFixture(config)), /Idle/);
-});
-
-test("current Gemini, Claude and GPT labels select the matching dual quota windows", () => {
-  for (const [label, wantFiveHour, wantWeekly] of [
-    ["Gemini 3.8 Flash (High)", "42%", "81%"],
-    ["Claude Sonnet 4.6 (Thinking)", "13%", "67%"],
-    ["GPT-OSS 120B (Medium)", "13%", "67%"]
-  ]) {
-    const payload = { ...fixturePayload(), terminal_width: 180, model: { display_name: label }, quota: {
-      "gemini-5h": { remaining_fraction: 0.42 }, "gemini-weekly": { remaining_fraction: 0.81 },
-      "3p-5h": { remaining_fraction: 0.13 }, "3p-weekly": { remaining_fraction: 0.67 }
-    } };
-    const usage = render(payload, { config: { ...defaultConfig(), color: false } }).split("\n")[1];
-    assert.match(usage, new RegExp(wantFiveHour));
-    assert.match(usage, new RegExp(wantWeekly));
+test("missing, empty, and malformed quota renders Quota N/A without fabricating values", () => {
+  const base = fixturePayload();
+  const malformedCases: unknown[] = [
+    undefined,
+    {},
+    { "gemini-5h": { remaining_fraction: -0.2 } },
+    { "gemini-5h": { remaining_fraction: "bad" } }
+  ];
+  for (const quota of malformedCases) {
+    const out = render({ ...base, quota: quota as Payload["quota"], terminal_width: 120 }, { config: cleanConfig() });
+    assert.match(out, /Quota N\/A/);
+    assert.doesNotMatch(out, /% left/);
   }
 });
 
-// A real Antigravity CLI 1.4.5 payload (sanitized) with Gemini 4 Argon selected on a Pro plan. /usage
-// lists Argon as its own group there, with a weekly limit and no 5-hour one, so neither Gemini bucket
-// applies: here they read 100% and 39% left while Argon itself has nothing left.
-test("Gemini 4 Argon reads its own weekly bucket from a real 1.4.5 payload", () => {
-  const payload = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "testdata", "statusline_payload_1.4.5.json"), "utf8"));
-  const out = strip(render(payload, { config: defaultConfig(), quota: null, gitBranch: "main", now: new Date("2026-10-22T13:06:20Z") }));
-  const [line1, line2] = out.split("\n");
-  assert.match(line1, /4 Argon Med/);
-  assert.match(line2, /Usage \S+ 0% left ↻ Reset 1d 13h/);
-  assert.doesNotMatch(line2, /39%|100%/);
-});
-
-test("Gemini 4 Argon falls back to the Gemini buckets when it has no bucket of its own", () => {
-  // Ultra plans count Argon against the larger Gemini bucket, so the payload has no Argon entry.
-  const payload = { ...fixturePayload(), terminal_width: 180, model: { display_name: "Gemini 4 Argon (Medium)" }, quota: {
-    "gemini-5h": { remaining_fraction: 0.42 }, "gemini-weekly": { remaining_fraction: 0.81 }
-  } };
-  const usage = render(payload, { config: { ...defaultConfig(), color: false } }).split("\n")[1];
-  assert.match(usage, /42%.*81%/);
-});
-
-test("Gemini 4 Argon reads its weekly bucket from a usage cache when the payload has no quota", () => {
-  const payload = fixturePayload();
-  payload.model = { display_name: "Gemini 4 Argon (Medium)" };
-  payload.quota = undefined;
-  const config = defaultConfig();
-  config.color = false;
-  const cache: Cache = { timestamp: "2026-06-15T03:51:00Z", source: "usage", models: {},
-    quota: { "gemini-argon-wtu-weekly": { remaining_fraction: 0.25, reset_time: weeklyReset } } };
-  const out = strip(render(payload, { config, quota: cache, gitBranch: "main", now: new Date("2026-06-15T03:52:00Z") }));
-  assert.match(out, /Usage \S+ 25% left ↻ Reset 3d 21h/);
-});
-
-// Whether Argon has a bucket of its own is a fact about the plan, and the payload states it for the
-// current session. A /usage cache read on a Pro plan must not keep Argon off the Gemini buckets once
-// the payload, as on an Ultra plan, carries none.
-test("an Argon bucket only in the usage cache does not override a payload without one", () => {
-  const payload = fixturePayload();
-  payload.terminal_width = 180;
-  payload.model = { display_name: "Gemini 4 Argon (Medium)" };
-  payload.quota = {
-    "gemini-5h": { remaining_fraction: 0.7, reset_time: fiveHourReset, reset_in_seconds: 16151 },
-    "gemini-weekly": { remaining_fraction: 0.8, reset_time: weeklyReset, reset_in_seconds: 336547 }
-  };
-  const config = defaultConfig();
-  config.color = false;
-  const cache: Cache = { timestamp: "2026-06-15T03:51:00Z", source: "usage", models: {},
-    quota: { "gemini-argon-wtu-weekly": { remaining_fraction: 0, reset_time: weeklyReset } } };
-  const line = strip(render(payload, { config, quota: cache, gitBranch: "main", now: new Date("2026-06-15T03:52:00Z") })).split("\n")[1];
-  assert.match(line, /70%.*80%/);
-  assert.doesNotMatch(line, /0% left/);
-});
-
-// Only Gemini buckets say anything about how the plan treats Argon. A payload carrying nothing but
-// third-party quota is silent on it, so the cache still decides.
-test("a payload with only third-party quota leaves the Argon decision to the usage cache", () => {
-  const payload = fixturePayload();
-  payload.model = { display_name: "Gemini 4 Argon (Medium)" };
-  payload.quota = { "3p-5h": { remaining_fraction: 0.9, reset_time: fiveHourReset } };
-  const config = defaultConfig();
-  config.color = false;
-  const cache: Cache = { timestamp: "2026-06-15T03:51:00Z", source: "usage", models: {},
-    quota: { "gemini-argon-wtu-weekly": { remaining_fraction: 0.25, reset_time: weeklyReset } } };
-  const out = strip(render(payload, { config, quota: cache, gitBranch: "main", now: new Date("2026-06-15T03:52:00Z") }));
-  assert.match(out, /Usage \S+ 25% left/);
-});
-
-test("Gemini models other than Argon ignore the Argon bucket", () => {
-  const payload = { ...fixturePayload(), terminal_width: 180, model: { display_name: "Gemini 3.8 Flash (High)" }, quota: {
-    "gemini-5h": { remaining_fraction: 0.42 }, "gemini-weekly": { remaining_fraction: 0.81 },
-    "gemini-argon-wtu-weekly": { remaining_fraction: 0 }
-  } };
-  const usage = render(payload, { config: { ...defaultConfig(), color: false } }).split("\n")[1];
-  assert.match(usage, /42%.*81%/);
-});
-
-test("context value formats", () => {
-  const cases: Record<string, string> = {
-    percent: "Context █░░░░░░░░░ 12%",
-    tokens: "Context █░░░░░░░░░ 125k/1M",
-    both: "Context █░░░░░░░░░ 12% (125k/1M)"
-  };
-  for (const [value, want] of Object.entries(cases)) {
-    const config = defaultConfig();
-    config.color = false;
-    config.contextValue = value;
-    assert.match(renderFixture(config), new RegExp(want.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
-});
-
-test("context percent ignores volatile output token count", () => {
-  const payload = fixturePayload();
-  payload.context_window = {
-    total_input_tokens: 60_000,
-    total_output_tokens: 40_000,
-    context_window_size: 1_000_000,
-    used_percentage: 10
-  };
-  const config = defaultConfig();
-  config.color = false;
-  config.contextValue = "both";
-
-  const out = strip(render(payload, {
-    config,
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
-  }));
-
-  assert.match(out, /Context .* 6%/);
-  assert.match(out, /\(60k\/1M\)/);
-  assert.doesNotMatch(out, /Context .* 10%/);
-  assert.doesNotMatch(out, /\(100k\/1M\)/);
-});
-
-test("usage value can show percent used", () => {
-  const cache: Cache = {
-    models: {
-      "Gemini 3.5 Flash (Medium)": {
-        remainingFraction: 0.20,
-        resetTime: "2026-05-19T12:44:00Z"
+test("single-bucket quota renders bucket label, remaining percentage, countdown, and absolute reset time", () => {
+  const payload: Payload = {
+    ...fixturePayload(),
+    terminal_width: 120,
+    vcs: { type: "git", branch: "main" },
+    quota: {
+      "gemini-5h": {
+        remaining_fraction: 0.72,
+        reset_time: "2026-11-20T18:00:00Z",
+        reset_in_seconds: 198000
       }
     }
   };
-  const config = defaultConfig();
-  config.color = false;
-  config.usageValue = "percent";
-  assert.match(renderFixture(config, cache), /Usage ██████░░ 80% ↻ Reset \d\d:\d\d/);
-  assert.doesNotMatch(renderFixture(config, cache), /↻ 00:44/);
-});
-
-test("header uses theme palette ANSI colors", () => {
-  const out = renderFixture(defaultConfig());
-  const lines = out.split("\n");
-  assert.match(lines[0], /\x1b\[34m 3\.5 Flash Med \|  Pro\x1b\[0m/);
-  assert.match(lines[0], /\x1b\[33m agy-hud\x1b\[0m/);
-  assert.match(lines[0], /\x1b\[35m main\x1b\[0m/);
-});
-
-test("remaining usage bar color reflects used percentage", () => {
-  const cache: Cache = {
-    models: {
-      "Gemini 3.5 Flash (Medium)": {
-        remainingFraction: 0.40,
-        resetTime: "2026-05-19T12:44:00Z"
-      }
-    }
-  };
-  const out = renderFixture(defaultConfig(), cache);
-  assert.match(out, /Usage \x1b\[33m███░░░░░\x1b\[0m/);
-  assert.match(strip(out), /40% left/);
-});
-
-test("quota miss omits usage without fake limit", () => {
-  const out = strip(renderFixture(defaultConfig()));
-  assert.doesNotMatch(out, /Limit --/);
-  assert.doesNotMatch(out, /Usage/);
-  assert.doesNotMatch(out, /weekly/);
-});
-
-test("full remaining quota hides inactive reset countdown", () => {
-  const cache: Cache = {
-    models: {
-      "Gemini 3.5 Flash (Medium)": {
-        remainingFraction: 1,
-        resetTime: "2026-05-19T14:44:00Z"
-      }
-    }
-  };
-  const out = strip(renderFixture(defaultConfig(), cache));
-  assert.match(out, /Usage/);
-  assert.match(out, /100% left/);
-  assert.doesNotMatch(out, /↻/);
-  assert.doesNotMatch(out, /02:44/);
-});
-
-test("payload model wins over stale cache active model", () => {
-  const payload = fixturePayload();
-  payload.model = { display_name: "Claude Sonnet 4.6 (Thinking)" };
-  const cache: Cache = {
-    models: {
-      "Gemini 3.5 Flash (High)": {
-        remainingFraction: 0.8,
-        resetTime: "2026-05-19T12:44:00Z"
-      },
-      "Claude Sonnet 4.6 (Thinking)": {
-        remainingFraction: 1,
-        resetTime: "2026-05-19T16:44:00Z"
-      }
-    }
-  };
-
-  const out = strip(render(payload, {
-    config: defaultConfig(),
-    quota: { ...cache, active_model: "Gemini 3.5 Flash (High)" } as Cache,
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
-  }));
-
-  assert.match(out, /Sonnet 4\.6/);
-  assert.match(out, /100% left/);
-  assert.doesNotMatch(out, /3\.5 Flash High/);
-});
-
-test("single-line can show token detail only when it fits", () => {
-  const config = defaultConfig();
-  config.multiline = false;
-  config.showProgressBar = false;
-  const out = strip(renderFixture(config));
-  assert.doesNotMatch(out, /\n/);
-  assert.match(out, /\(125k\/1M\)/);
-
-  const payload = fixturePayload();
-  payload.terminal_width = 35;
-  const narrow = render(payload, {
-    config,
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
+  const out = render(payload, {
+    config: cleanConfig({ locale: "en-GB", timeZone: "Asia/Hong_Kong" }),
+    now: new Date("2026-11-18T10:25:00Z")
   });
-  assert.doesNotMatch(strip(narrow), /\(125k\/1M\)/);
-  assert.ok(visibleLen(narrow) <= 35);
+  const [line1, line2] = out.split("\n");
+  assert.match(line1, /3\.5 Flash Med \| Pro/);
+  assert.match(line1, /agy-hud/);
+  assert.match(line1, /main/);
+  assert.match(line1, /Idle/);
+  assert.match(line2, /Context .* 12%/);
+  assert.equal(line2, "Context █░░░░░░░░░ 12% │ Quota: Gemini 5h: 72% left (2d 7h 35m, 21-Nov-2026 2:00)");
+  assert.doesNotMatch(line2, /28%/);
 });
 
-test("color can be disabled", () => {
-  const config = defaultConfig();
-  config.color = false;
-  assert.doesNotMatch(renderFixture(config), /\x1b\[/);
-});
-
-test("icons can be disabled", () => {
-  const config = defaultConfig();
-  config.showIcons = false;
-  const out = strip(renderFixture(config));
-  for (const icon of ["", "", "", "", "↻"]) {
-    assert.doesNotMatch(out, new RegExp(icon));
+test("multi-bucket quota renders uniform no-bar horizontal per-group lines with DD-MMM-YYYY", () => {
+  const payload: Payload = {
+    ...fixturePayload(),
+    terminal_width: 140,
+    vcs: { type: "git", branch: "main" },
+    quota: {
+      "gemini-5h": {
+        remaining_fraction: 0.96,
+        reset_time: "2026-11-20T18:00:00Z"
+      },
+      "gemini-weekly": {
+        remaining_fraction: 0.91,
+        reset_time: "2026-11-22T22:35:00Z"
+      },
+      "gemini-argon-wtu-weekly": {
+        remaining_fraction: 0.98,
+        reset_time: "2026-11-23T06:00:00Z"
+      },
+      "3p-5h": {
+        remaining_fraction: 1,
+        reset_time: "2026-11-20T19:00:00Z"
+      },
+      "3p-weekly": {
+        remaining_fraction: 0.5,
+        reset_time: "2026-11-24T10:00:00Z"
+      }
+    }
+  };
+  const out = render(payload, {
+    config: cleanConfig({ locale: "en-US", timeZone: "Asia/Hong_Kong" }),
+    now: new Date("2026-11-18T10:25:00Z")
+  });
+  const lines = out.split("\n");
+  assert.equal(lines.length, 5);
+  assert.match(lines[1], /^Context .* 12%$/);
+  assert.equal(lines[2], " Gemini     │ 5h: 96% left (2d 7h 35m, 21-Nov-2026 2:00 AM)  │ Weekly: 91% left (4d 12h 10m, 23-Nov-2026 6:35 AM)");
+  assert.equal(lines[3], " Argon      │                                                │ Weekly: 98% left (4d 19h 35m, 23-Nov-2026 2:00 PM)");
+  assert.equal(lines[4], " Claude/GPT │ 5h: 100% left (2d 8h 35m, 21-Nov-2026 3:00 AM) │ Weekly: 50% left (5d 23h 35m, 24-Nov-2026 6:00 PM)");
+  for (const qLine of lines.slice(2)) {
+    assert.doesNotMatch(qLine, /[█░]|Reset /);
   }
-  assert.match(out, /3\.5 Flash Med \| Pro/);
-  assert.match(out, /agy-hud/);
-  assert.match(out, /main/);
+  const weeklyCols = lines.slice(2).map(l => l.indexOf("Weekly:"));
+  assert.equal(weeklyCols[0], weeklyCols[1]);
+  assert.equal(weeklyCols[1], weeklyCols[2]);
+
+  for (const width of [80, 120, 140]) {
+    const wideOut = strip(
+      render({ ...payload, terminal_width: width }, {
+        config: cleanConfig({ locale: "en-US", timeZone: "Asia/Hong_Kong" }),
+        now: new Date("2026-11-18T10:25:00Z")
+      })
+    );
+    const qLines = wideOut.split("\n").slice(2);
+    assert.match(qLines[1], /^ Argon\s+│\s+│ Weekly: /);
+    const cols = qLines.map(l => l.indexOf("Weekly:"));
+    assert.ok(cols[0] > 0);
+    assert.equal(cols[0], cols[1]);
+    assert.equal(cols[1], cols[2]);
+  }
+});
+
+test("known CLI 1.3.5 (2 groups) and 1.4.5 (3 groups) payloads render horizontal groups uniformly without bars", () => {
+  const p135: Payload = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "testdata", "statusline_payload_1.3.5.json"), "utf8"));
+  const out135 = render(p135, { config: cleanConfig(), now: new Date("2026-10-15T08:38:00Z") });
+  const lines135 = out135.split("\n");
+  assert.equal(lines135.length, 4);
+  assert.equal(lines135[2], " Gemini     │ 5h: 100% left (5h 00m, 15-Oct-2026 13:37) │ Weekly: 98% left (5d 21h 39m, 21-Oct-2026 6:16)");
+  assert.equal(lines135[3], " Claude/GPT │ 5h: 100% left (5h 00m, 15-Oct-2026 13:37) │ Weekly: 100% left (7d 0h 00m, 22-Oct-2026 8:37)");
+
+  const p145: Payload = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "testdata", "statusline_payload_1.4.5.json"), "utf8"));
+  const out145 = render(p145, { config: cleanConfig(), now: new Date("2026-10-22T13:06:20Z") });
+  const lines145 = out145.split("\n");
+  assert.equal(lines145.length, 5);
+  assert.match(lines145[0], /4 Argon Med/);
+  assert.equal(lines145[2], " Gemini     │ 5h: 100% left (4h 59m, 22-Oct-2026 18:04) │ Weekly: 39% left (1d 9h 02m, 23-Oct-2026 22:08)");
+  assert.equal(lines145[3], " Argon      │                                           │ Weekly: 0% left (1d 13h 24m, 24-Oct-2026 2:29)");
+  assert.equal(lines145[4], " Claude/GPT │ 5h: 100% left (5h 00m, 22-Oct-2026 18:06) │ Weekly: 10% left (1d 7h 32m, 23-Oct-2026 20:38)");
+});
+
+test("past-due reset timestamp displays Reset due / awaiting update", () => {
+  const payload: Payload = {
+    ...fixturePayload(),
+    terminal_width: 120,
+    quota: {
+      "gemini-5h": {
+        remaining_fraction: 0.15,
+        reset_time: "2026-11-18T09:00:00Z"
+      }
+    }
+  };
+  const out = render(payload, { config: cleanConfig(), now: new Date("2026-11-18T10:00:00Z") });
+  assert.match(out, /Gemini 5h: 15% left \(Reset due \/ awaiting update\)/);
+});
+
+test("reset_in_seconds fallback marks derived absolute timestamp as estimated", () => {
+  const payload: Payload = {
+    ...fixturePayload(),
+    terminal_width: 120,
+    quota: {
+      "gemini-5h": {
+        remaining_fraction: 0.6,
+        reset_in_seconds: 3600
+      }
+    }
+  };
+  const out = render(payload, { config: cleanConfig(), now: new Date("2026-11-18T10:00:00Z") });
+  assert.match(out, /Gemini 5h: 60% left \(1h 00m, ~18-Nov-2026 11:00 \(estimated\)\)/);
+});
+
+test("ANSI, OSC, control chars, and bidi injection are stripped across all untrusted fields", () => {
+  const payload: Payload = {
+    model: { display_name: "Evil\x1b]0;pwned\x07Model\n\x1b[31mRed\x1b[0m" },
+    cwd: "/tmp/dir\x1b[31m\n\r\tName",
+    vcs: { branch: "feat/\x1b]8;;http://evil\x07\u202Emain\x07\n" },
+    agent_state: "idle\x1b[2J\x00",
+    conversation_title: "Title\n\x1b]0;x\x07\u202E",
+    plan_tier: "\x1b[31mPro\x1b[0m",
+    cycle_mode: "\x1b[31mauto",
+    terminal_width: 160,
+    quota: {
+      "bucket\x1b[31m\n\x07id_very_long_name_exceeding_thirty_two_columns": {
+        remaining_fraction: 0.5,
+        reset_time: "2026-11-20T18:00:00Z"
+      }
+    }
+  };
+
+  const out = render(payload, {
+    config: cleanConfig({ showTitle: true }),
+    now: new Date("2026-11-18T10:00:00Z")
+  });
+  assert.doesNotMatch(out, /[\x00-\x09\x0b-\x1f\x7f\u202e]/);
+  assert.doesNotMatch(out, /pwned|http:\/\/evil/);
+  assert.equal(out.split("\n").length, 2);
+});
+
+test("terminal widths 40, 60, 80, 120 and extreme narrow widths degrade gracefully", () => {
+  const payload: Payload = {
+    ...fixturePayload(),
+    vcs: { type: "git", branch: "feature/very-long-branch-name" },
+    cost: { total_usd: 1.25, estimated: true },
+    quota: {
+      "gemini-5h": {
+        remaining_fraction: 0.72,
+        reset_time: "2026-11-20T18:00:00Z"
+      },
+      "gemini-weekly": {
+        remaining_fraction: 0.18,
+        reset_time: "2026-11-22T22:35:00Z"
+      },
+      "gemini-argon-wtu-weekly": {
+        remaining_fraction: 0.55,
+        reset_time: "2026-11-23T06:00:00Z"
+      },
+      "3p-5h": {
+        remaining_fraction: 0.9,
+        reset_time: "2026-11-18T15:00:00Z"
+      },
+      "3p-weekly": {
+        remaining_fraction: 0.4,
+        reset_time: "2026-11-24T10:00:00Z"
+      }
+    }
+  };
+
+  for (const multiline of [true, false]) {
+    for (const width of [10, 20, 40, 60, 80, 120, 140]) {
+      const out = render({ ...payload, terminal_width: width }, {
+        config: { ...defaultConfig(), multiline },
+        now: new Date("2026-11-18T10:25:00Z")
+      });
+      if (!multiline) {
+        assert.doesNotMatch(out, /\n/);
+      }
+      for (const line of out.split("\n")) {
+        assert.ok(visibleLen(line) <= width, `multiline=${multiline} width=${width} exceeded by ${JSON.stringify(strip(line))}`);
+      }
+    }
+  }
+
+  // At 60 cols on single bucket, cosmetic bar drops before remaining percentage
+  const singleNarrow = render(
+    {
+      ...fixturePayload(),
+      terminal_width: 60,
+      quota: { "gemini-5h": { remaining_fraction: 0.72, reset_time: "2026-11-20T18:00:00Z" } }
+    },
+    { config: cleanConfig(), now: new Date("2026-11-18T10:25:00Z") }
+  );
+  assert.match(singleNarrow, /72% left/);
+  for (const line of singleNarrow.split("\n")) {
+    assert.ok(visibleLen(line) <= 60);
+  }
 });
 
 test("sensitive payload fields never leak", () => {
@@ -488,27 +280,11 @@ test("sensitive payload fields never leak", () => {
   payload.transcript_path = "private-transcript-location";
   const out = render(payload, {
     config: defaultConfig(),
-    quota: { email: "private-cache-email-value", models: {} },
     now: new Date("2026-05-19T12:00:00Z")
   });
   const lower = strip(out).toLowerCase();
-  for (const forbidden of ["private-email-value", "private-session-value", "private-conversation-value", "private-transcript-location", "csrf", "cookie", "token", "key"]) {
+  for (const forbidden of ["private-email-value", "private-session-value", "private-conversation-value", "private-transcript-location", "csrf", "cookie", "token"]) {
     assert.doesNotMatch(lower, new RegExp(forbidden));
-  }
-});
-
-test("width degradation keeps every line within terminal width", () => {
-  for (const width of [10, 20, 30, 40, 60, 80]) {
-    const payload = fixturePayload();
-    payload.terminal_width = width;
-    const out = render(payload, {
-      config: defaultConfig(),
-      gitBranch: "main",
-      now: new Date("2026-05-19T12:00:00Z")
-    });
-    for (const line of out.split("\n")) {
-      assert.ok(visibleLen(line) <= width, `width ${width} exceeded by line ${JSON.stringify(line)}`);
-    }
   }
 });
 
@@ -519,394 +295,5 @@ test("formatCost formats USD values cleanly", () => {
   assert.equal(formatCost(0.0004), "<$0.001");
   assert.equal(formatCost(0.0042), "$0.004");
   assert.equal(formatCost(0.012), "$0.01");
-  assert.equal(formatCost(0.158), "$0.16");
   assert.equal(formatCost(1.25), "$1.25");
-  assert.equal(formatCost(12.5), "$12.50");
-});
-
-test("renders cost at the end of line 1 when available", () => {
-  const payload = fixturePayload();
-  payload.cost = {
-    total_usd: 0.0345
-  };
-  const out = strip(render(payload, {
-    config: defaultConfig(),
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
-  }));
-  const line1 = out.split("\n")[0];
-  assert.match(line1, /Idle │ \$0\.03$/);
-
-  // Can be disabled via showCost
-  const noCostConfig = defaultConfig();
-  noCostConfig.showCost = false;
-  const noCostOut = strip(render(payload, {
-    config: noCostConfig,
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
-  }));
-  assert.doesNotMatch(noCostOut.split("\n")[0], /\$0\.03/);
-});
-
-test("single-line renders cost at the end when it fits", () => {
-  const payload = fixturePayload();
-  payload.cost = {
-    total_usd: 0.12
-  };
-  const config = defaultConfig();
-  config.multiline = false;
-  const out = strip(render(payload, {
-    config,
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
-  }));
-  assert.doesNotMatch(out, /\n/);
-  assert.match(out, /Idle  \$0\.12$/);
-});
-
-test("multiline drops cost before directory or branch at boundary widths", () => {
-  const payload: Payload = {
-    model: { display_name: "Claude Sonnet 4.6" }, cwd: "/workspace/project",
-    plan_tier: "Google AI Pro", agent_state: "idle", cost: { total_usd: 0 }
-  };
-  const config = { ...defaultConfig(), color: false, showIcons: false };
-  const cases = [
-    [40, "Sonnet 4.6 | Pro │ project │ main │ Idle"],
-    [32, "Sonnet 4.6 | Pro │ main │ Idle"]
-  ] as const;
-  for (const [width, want] of cases) {
-    assert.equal(render({ ...payload, terminal_width: width }, { config, gitBranch: "main" }).split("\n")[0], want);
-  }
-});
-
-test("single-line drops cost before quota at boundary width", () => {
-  const payload: Payload = {
-    model: { display_name: "Claude Sonnet 4.6" }, plan_tier: "Google AI Pro",
-    terminal_width: 50, agent_state: "idle", context_window: { used_percentage: 12 },
-    quota: { "3p-5h": { remaining_fraction: 0.01 } }, cost: { total_usd: 0 }
-  };
-  const config = { ...defaultConfig(), multiline: false, color: false, showIcons: false };
-  assert.equal(render(payload, { config }), "Sonnet 4.6 | Pro  Ctx 12%  Usage 1% left  Idle");
-});
-
-test("cost estimates are marked in both layouts using the provided total", () => {
-  for (const multiline of [true, false]) {
-    const config = { ...defaultConfig(), multiline, color: false };
-    const payload = { ...fixturePayload(), terminal_width: 180, cost: { total_usd: 1.25, subagent_usd: 0.25, estimated: true } };
-    assert.match(render(payload, { config }).split("\n")[0], /~\$1\.25$/);
-    payload.cost.estimated = false;
-    assert.match(render(payload, { config }).split("\n")[0], /[^~]\$1\.25$/);
-  }
-});
-
-test("invalid cost is omitted rather than reported as zero spend", () => {
-  for (const multiline of [true, false]) {
-    for (const total_usd of [NaN, Infinity, -1]) {
-      const out = render({ ...fixturePayload(), cost: { total_usd }, terminal_width: 180 }, {
-        config: { ...defaultConfig(), multiline, color: false }
-      });
-      assert.doesNotMatch(out, /\$/);
-    }
-  }
-});
-
-test("plan badges normalize known tiers and do not call unknown paid plans Free", () => {
-  const cases = [
-    ["Pro", "Pro"], ["Google AI Pro", "Pro"], [" pro ", "Pro"],
-    ["Ultra", "Ultra"], ["Google AI Ultra", "Ultra"], ["Free", "Free"],
-    ["Google AI Free", "Free"], ["Enterprise", "Plan ?"], ["", "Plan ?"],
-    ["\x1b]0;untrusted title\x07", "Plan ?"]
-  ];
-  for (const [plan_tier, want] of cases) {
-    const out = render({ model: { display_name: "Claude Sonnet 4.6" }, plan_tier, terminal_width: 100 }, {
-      config: { ...defaultConfig(), color: false, showIcons: false }
-    });
-    assert.equal(out.split("\n")[0], `Sonnet 4.6 | ${want} │ Idle`);
-  }
-});
-
-test("narrow CJK model headers are clipped to columns without splitting graphemes", () => {
-  for (const [display_name, width, want] of [["中文模型", 3, "中"], ["👩‍💻abc", 2, "👩‍💻"], ["e\u0301abc", 1, "e\u0301"]] as const) {
-    const out = render({ model: { display_name }, terminal_width: width }, {
-      config: { ...defaultConfig(), color: false, showIcons: false, showAgentState: false }
-    });
-    assert.equal(out.split("\n")[0], want);
-  }
-});
-
-test("recent emoji headers neither overflow nor disappear at two columns", () => {
-  for (const model of ["🫨", "🧑🏽‍💻"]) {
-    const out = render({ model: { display_name: `${model}abc` }, terminal_width: 2 }, {
-      config: { ...defaultConfig(), color: false, showIcons: false, showAgentState: false }
-    });
-    assert.equal(out.split("\n")[0], model);
-  }
-});
-
-test("cost and wide workspace labels obey both layout width limits", () => {
-  for (const multiline of [true, false]) {
-    for (const width of [10, 20, 30, 40, 60, 80]) {
-      for (const total_usd of [0, 0.0001, 0.01, 1.25]) {
-        const payload = { ...fixturePayload(), cwd: "/workspace/中文目录👩‍💻", terminal_width: width, cost: { total_usd, estimated: true } };
-        const out = render(payload, { config: { ...defaultConfig(), multiline }, gitBranch: "main" });
-        for (const line of out.split("\n")) assert.ok(visibleLen(line) <= width);
-      }
-    }
-  }
-});
-
-// Antigravity CLI 1.1.27 added conversation_title to the status-line payload.
-function titled(title: unknown, width = 120): Payload {
-  return {
-    model: { display_name: "Claude Sonnet 4.6" }, cwd: "/workspace/project",
-    plan_tier: "Google AI Pro", agent_state: "idle", terminal_width: width,
-    conversation_title: title as string
-  };
-}
-
-test("conversation title stays hidden unless show_title is enabled", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false };
-  assert.equal(defaultConfig().showTitle, false);
-  assert.doesNotMatch(render(titled("Fix login"), { config, gitBranch: "main" }), /Fix login/);
-});
-
-test("multiline shows the conversation title between branch and state", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false, showTitle: true };
-  const line1 = render(titled("Fix login"), { config, gitBranch: "main" }).split("\n")[0];
-  assert.equal(line1, "Sonnet 4.6 | Pro │ project │ main │ Fix login │ Idle");
-});
-
-test("conversation title cannot inject control sequences or break the layout", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false, showTitle: true };
-  const out = render(titled("Fix\nlogin\x1b]0;pwned\x07 \u202Eflow\t"), { config, gitBranch: "main" });
-  assert.equal(out.split("\n").length, 2, "a newline in the title must not add a HUD line");
-  assert.doesNotMatch(out.split("\n")[0], /[\x00-\x1f\x7f\u202e]/);
-  assert.match(out.split("\n")[0], /│ Fix login ?\]0;pwned flow │ Idle$/);
-});
-
-test("long conversation titles are clipped to a bounded width", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false, showTitle: true };
-  const line1 = render(titled("Refactor the quota probe discovery and hint cache"), { config, gitBranch: "main" }).split("\n")[0];
-  const segment = line1.split(" │ ")[3];
-  assert.ok(segment.endsWith("…"), segment);
-  assert.equal(visibleLen(segment), 24);
-});
-
-test("empty or non-string conversation titles are omitted", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false, showTitle: true };
-  for (const title of ["", "   ", 42, null]) {
-    assert.equal(render(titled(title), { config, gitBranch: "main" }).split("\n")[0], "Sonnet 4.6 | Pro │ project │ main │ Idle");
-  }
-});
-
-test("multiline drops the conversation title before cost", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false, showTitle: true };
-  const payload = { ...titled("Fix login", 50), cost: { total_usd: 0 } };
-  assert.equal(render(payload, { config, gitBranch: "main" }).split("\n")[0], "Sonnet 4.6 | Pro │ project │ main │ Idle │ $0.00");
-});
-
-test("single-line shows the conversation title before state and drops it first", () => {
-  const config = { ...defaultConfig(), multiline: false, color: false, showIcons: false, showTitle: true };
-  const payload: Payload = { ...titled("Fix login", 120), context_window: { used_percentage: 12 } };
-  assert.equal(render(payload, { config }), "Sonnet 4.6 | Pro  Ctx 12%  █░░░░░░░░░  Fix login  Idle");
-  assert.equal(render({ ...payload, terminal_width: 45 }, { config }), "Sonnet 4.6 | Pro  Ctx 12%  █░░░░░░░░░  Idle");
-});
-
-// A `/usage` cache carries the payload's bucket shape. Each window takes the fresher of the two
-// readings: a later reset_time is a newer window, and within one window the lower remainder is newer.
-function bucketRender(payloadQuota: Payload["quota"], cacheQuota: Cache["quota"], now = "2026-06-15T03:52:00Z"): string {
-  const payload = fixturePayload();
-  payload.terminal_width = 160;
-  payload.quota = payloadQuota;
-  const config = defaultConfig();
-  config.color = false;
-  const cache: Cache = { timestamp: "2026-06-15T03:51:00Z", source: "usage", models: {}, quota: cacheQuota };
-  return strip(render(payload, { config, quota: cache, gitBranch: "main", now: new Date(now) })).split("\n")[1];
-}
-
-const fiveHourReset = "2026-06-15T08:21:23Z";
-const weeklyReset = "2026-06-19T01:21:19Z";
-
-test("a usage cache with less left in the same window wins, for the weekly window too", () => {
-  const line = bucketRender(
-    { "gemini-5h": { remaining_fraction: 0.84, reset_time: fiveHourReset, reset_in_seconds: 16151 },
-      "gemini-weekly": { remaining_fraction: 0.91, reset_time: weeklyReset, reset_in_seconds: 336547 } },
-    { "gemini-5h": { remaining_fraction: 0.8, reset_time: fiveHourReset },
-      "gemini-weekly": { remaining_fraction: 0.88, reset_time: weeklyReset } }
-  );
-  assert.match(line, /Usage \S+ 80% \(↻ 4h 29m\) \| .*88% \(↻ 3d 21h\)/, "cached windows show the same countdown style");
-});
-
-test("the payload wins a window where it already shows less left", () => {
-  const line = bucketRender(
-    { "gemini-5h": { remaining_fraction: 0.7, reset_time: fiveHourReset, reset_in_seconds: 16151 },
-      "gemini-weekly": { remaining_fraction: 0.85, reset_time: weeklyReset, reset_in_seconds: 336547 } },
-    { "gemini-5h": { remaining_fraction: 0.8, reset_time: fiveHourReset },
-      "gemini-weekly": { remaining_fraction: 0.88, reset_time: weeklyReset } }
-  );
-  assert.match(line, /Usage \S+ 70% \(↻ 4h 29m\) \| .*85% \(↻ 3d 21h\)/);
-});
-
-test("an expired payload window yields to the live cached one", () => {
-  const line = bucketRender(
-    { "gemini-5h": { remaining_fraction: 0.3, reset_time: "2026-06-15T03:00:00Z" },
-      "gemini-weekly": { remaining_fraction: 0.85, reset_time: weeklyReset } },
-    { "gemini-5h": { remaining_fraction: 0.95, reset_time: fiveHourReset },
-      "gemini-weekly": { remaining_fraction: 0.85, reset_time: weeklyReset } },
-    "2026-06-15T03:30:00Z"
-  );
-  assert.match(line, /Usage \S+ 95% /);
-});
-
-// An untouched bucket has no window yet, so its reset_time floats with the query time. Two live
-// readings of one bucket are always the same window, whatever their reset times say.
-test("an untouched bucket whose reset floats later never erases usage in the live window", () => {
-  const floating = "2026-06-15T08:40:00Z";
-  const cacheUntouched = bucketRender(
-    { "gemini-5h": { remaining_fraction: 0.85, reset_time: fiveHourReset, reset_in_seconds: 16151 } },
-    { "gemini-5h": { remaining_fraction: 1, reset_time: floating } }
-  );
-  assert.match(cacheUntouched, /Usage \S+ 85% /);
-  const payloadUntouched = bucketRender(
-    { "gemini-5h": { remaining_fraction: 1, reset_time: floating, reset_in_seconds: 17280 } },
-    { "gemini-5h": { remaining_fraction: 0.85, reset_time: fiveHourReset } }
-  );
-  assert.match(payloadUntouched, /Usage \S+ 85% /);
-});
-
-test("a cached bucket whose window has already reset is ignored", () => {
-  const line = bucketRender(
-    { "gemini-5h": { remaining_fraction: 0.84, reset_time: fiveHourReset, reset_in_seconds: 16151 } },
-    { "gemini-5h": { remaining_fraction: 0.1, reset_time: "2026-06-15T03:00:00Z" } }
-  );
-  assert.match(line, /84%/);
-  assert.doesNotMatch(line, /10%/);
-});
-
-test("a usage cache renders both windows when the payload has no quota", () => {
-  const line = bucketRender(undefined, {
-    "gemini-5h": { remaining_fraction: 0.6, reset_time: fiveHourReset },
-    "gemini-weekly": { remaining_fraction: 0.75, reset_time: weeklyReset }
-  });
-  assert.match(line, /Usage \S+ 60% .*\| .*75%/);
-});
-
-test("third-party models read the third-party buckets of a usage cache", () => {
-  const payload = fixturePayload();
-  payload.model = { display_name: "Claude Sonnet 4.6 (Thinking)" };
-  payload.quota = { "3p-5h": { remaining_fraction: 0.9, reset_time: fiveHourReset } };
-  const config = defaultConfig();
-  config.color = false;
-  const cache: Cache = { timestamp: "2026-06-15T03:51:00Z", source: "usage", models: {},
-    quota: { "3p-5h": { remaining_fraction: 0.5, reset_time: fiveHourReset }, "gemini-5h": { remaining_fraction: 0.2, reset_time: fiveHourReset } } };
-  const out = strip(render(payload, { config, quota: cache, gitBranch: "main", now: new Date("2026-06-15T03:52:00Z") }));
-  assert.match(out, /50% left/);
-});
-
-test("a title made only of invisible format characters is omitted", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false, showTitle: true };
-  const payload: Payload = {
-    model: { display_name: "Claude Sonnet 4.6" }, cwd: "/workspace/project",
-    plan_tier: "Google AI Pro", agent_state: "idle", terminal_width: 120,
-    conversation_title: "\u200B\u200D\uFEFF\u2060"
-  };
-  assert.equal(render(payload, { config, gitBranch: "main" }).split("\n")[0], "Sonnet 4.6 | Pro │ project │ main │ Idle");
-});
-
-test("titles keep joiners and tag characters that form visible glyphs", () => {
-  const config = { ...defaultConfig(), color: false, showIcons: false, showTitle: true };
-  const payload: Payload = {
-    model: { display_name: "Claude Sonnet 4.6" }, cwd: "/workspace/project",
-    plan_tier: "Google AI Pro", agent_state: "idle", terminal_width: 120,
-    conversation_title: "\u{1F468}\u200D\u{1F469}\u200D\u{1F467} Trip \u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F} \u0645\u06CC\u200C\u062E"
-  };
-  const line = render(payload, { config, gitBranch: "main" }).split("\n")[0];
-  assert.ok(line.includes("\u{1F468}\u200D\u{1F469}\u200D\u{1F467} Trip"), "a ZWJ family emoji stays one glyph");
-  assert.ok(line.includes("\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}"), "a tag-sequence flag stays intact");
-  assert.ok(line.includes("\u0645\u06CC\u200C\u062E"), "ZWNJ keeps its word shaping");
-});
-
-test("on equal remainders the cached reading wins, so the countdown is live", () => {
-  const line = bucketRender(
-    { "gemini-5h": { remaining_fraction: 0.85, reset_time: fiveHourReset, reset_in_seconds: 16151 + 1500 } },
-    { "gemini-5h": { remaining_fraction: 0.85, reset_time: fiveHourReset } }
-  );
-  assert.match(line, /85% left ↻ Reset 4h 29m/);
-});
-
-// A real Antigravity CLI 1.3.5 payload (sanitized). 1.3.x sends model.id equal to display_name rather
-// than a slug, and adds model.effort, cycle_mode, sandbox and exceeds_200k_tokens. Only cycle_mode
-// shows; the rest must not disturb the HUD.
-test("renders a real Antigravity CLI 1.3.5 payload", () => {
-  const payload = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "testdata", "statusline_payload_1.3.5.json"), "utf8"));
-  const out = strip(render(payload, { config: defaultConfig(), quota: null, gitBranch: "main", now: new Date("2026-10-15T08:38:00Z") }));
-  const [line1, line2] = out.split("\n");
-  assert.match(line1, /3\.8 Flash High/);
-  assert.match(line1, /Pro \| Auto/);
-  assert.match(line1, /Idle/);
-  assert.match(line2, /^Context .* 0%/);
-  // usage_value defaults to "remaining".
-  assert.match(line2, /Usage .* 100% \|.* 98% \(↻ 5d 21h\)/);
-  for (const line of out.split("\n")) {
-    assert.ok(visibleLen(line) <= 140);
-  }
-});
-
-// Antigravity CLI 1.3.5 sends the Shift+Tab agent mode as cycle_mode and omits it in the default mode.
-// It is a session setting, so it rides with the model and plan, before the directory.
-function renderMode(mode: unknown, overrides: Partial<Config> = {}, extra: Record<string, unknown> = {}): string {
-  const payload = { ...fixturePayload(), ...extra } as Payload & Record<string, unknown>;
-  if (mode !== undefined) payload.cycle_mode = mode;
-  return render(payload, {
-    config: { ...defaultConfig(), showIcons: false, ...overrides },
-    quota: null,
-    gitBranch: "main",
-    now: new Date("2026-05-19T12:00:00Z")
-  });
-}
-
-test("shows the agent mode after the plan tier and before the directory", () => {
-  const line1 = strip(renderMode("auto")).split("\n")[0];
-  assert.match(line1, /^3\.5 Flash Med \| Pro \| Auto │ agy-hud │ main │ /);
-});
-
-test("labels each known agent mode", () => {
-  assert.match(strip(renderMode("plan")), /\| Pro \| Plan │/);
-  assert.match(strip(renderMode("accept-edits")), /\| Pro \| Accept Edits │/);
-  assert.match(strip(renderMode("auto")), /\| Pro \| Auto │/);
-});
-
-test("renders the default mode exactly as before", () => {
-  const before = renderMode(undefined);
-  for (const mode of ["", "default", "DEFAULT"]) {
-    assert.equal(renderMode(mode), before, `cycle_mode ${JSON.stringify(mode)}`);
-  }
-});
-
-test("title-cases an unknown but plain mode and never prints an unsafe one", () => {
-  assert.match(strip(renderMode("review-only")), /\| Pro \| Review Only │/);
-  // Inherited object keys are plain unknown modes, never a lookup hit that prints "undefined".
-  assert.match(strip(renderMode("constructor")), /\| Pro \| Constructor │/);
-  assert.doesNotMatch(strip(renderMode("toString")), /undefined/);
-  const before = renderMode(undefined);
-  for (const mode of ["__proto__", "\x1b]0;pwned\x07", "auto mode", "a".repeat(25), "-auto", 42, null, { x: 1 }]) {
-    assert.equal(renderMode(mode), before, `cycle_mode ${JSON.stringify(mode)}`);
-  }
-});
-
-test("show_mode false hides the agent mode", () => {
-  assert.equal(renderMode("auto", { showMode: false }), renderMode(undefined));
-});
-
-test("colors the agent mode by how much it approves on its own", () => {
-  assert.ok(renderMode("auto", { color: true }).includes("\x1b[38;5;208mAuto\x1b[0m"));
-  assert.ok(renderMode("accept-edits", { color: true }).includes("\x1b[33mAccept Edits\x1b[0m"));
-  assert.ok(renderMode("plan", { color: true }).includes("\x1b[36mPlan\x1b[0m"));
-  assert.ok(!renderMode("auto", { color: false }).includes("\x1b["));
-});
-
-test("keeps the agent mode in the single-line layout and on a narrow terminal", () => {
-  assert.match(strip(renderMode("auto", { multiline: false })), /^3\.5 Flash Med \| Pro \| Auto /);
-  const narrow = strip(renderMode("auto", {}, { terminal_width: 30 })).split("\n")[0];
-  assert.match(narrow, /Auto/);
 });

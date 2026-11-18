@@ -1,7 +1,12 @@
+import { sanitizePlainText, truncateColumns, visibleLen } from "./ansi";
 import { Config } from "./config";
-import { truncateColumns, visibleLen } from "./ansi";
-import { Cache, matchModel, usagePercent as quotaUsagePercent } from "./quota";
-import path from "node:path";
+import {
+  NormalizedQuota,
+  NormalizedQuotaBucket,
+  NormalizedQuotaGroup,
+  normalizeQuota,
+  OfficialQuotaBucket
+} from "./quota";
 
 const colorReset = "\x1b[0m";
 const colorBlue = "\x1b[34m";
@@ -35,7 +40,6 @@ export interface Payload {
   };
   quota?: Record<string, OfficialQuotaBucket>;
   agent_state?: string;
-  // The Shift+Tab agent mode, Antigravity CLI 1.3.5+. Absent in the default mode.
   cycle_mode?: unknown;
   plan_tier?: string;
   terminal_width?: number;
@@ -55,42 +59,29 @@ export interface Payload {
   };
 }
 
-interface OfficialQuotaBucket {
-  remaining_fraction?: number;
-  reset_time?: string;
-  reset_in_seconds?: number;
-}
-
-interface QuotaWindowDisplay {
-  label: string;
-  usagePct: number;
-  reset: string;
-}
-
-interface QuotaDisplay {
-  usagePct: number;
-  reset: string;
-  hasQuota: boolean;
-  windows: QuotaWindowDisplay[];
-}
-
 export interface RenderOptions {
   config: Config;
-  quota?: Cache | null;
   gitBranch?: string;
   now?: Date;
 }
 
+const titleColumns = 24;
+const modelMaxColumns = 18;
+const cwdMaxColumns = 32;
+const branchMaxColumns = 40;
+const stateMaxColumns = 20;
+
 export function shortModelName(display: string): string {
-  let short = display.split("Gemini").join("");
+  let short = sanitizePlainText(display, 64);
+  short = short.split("Gemini").join("");
   short = short.split("Claude").join("");
   short = short.split("Thinking").join("");
   short = short.split("(").join("");
   short = short.split(")").join("");
   short = short.split("Medium").join("Med");
   short = short.trim().split(/\s+/).filter(Boolean).join(" ");
-  if (visibleLen(short) > 18) {
-    short = `${truncateColumns(short, 15)}...`;
+  if (visibleLen(short) > modelMaxColumns) {
+    short = `${truncateColumns(short, modelMaxColumns - 3)}...`;
   }
   return short;
 }
@@ -108,18 +99,16 @@ export function formatCost(usd: number): string {
   return "<$0.001";
 }
 
-const titleColumns = 24;
+function baseName(rawPath: unknown): string {
+  if (typeof rawPath !== "string") return "";
+  const parts = rawPath.split(/[/\\]+/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : "";
+}
 
-// The title is free text the user or the model chose, so it is reduced to one plain line: control
-// characters (newlines, ESC/OSC sequences, BEL) would otherwise break the HUD layout or reach the
-// terminal as commands. Format characters (bidi overrides, zero-width spaces) are dropped, so an
-// invisible title cannot take up columns or reorder the line. ZWNJ, ZWJ and tag characters stay: they
-// shape visible text (word breaks, ZWJ emoji, subdivision flags) and cost no columns of their own.
 function renderTitle(raw: unknown, config: Config): string {
-  if (!config.showTitle || typeof raw !== "string") return "";
-  const text = raw.replace(/\p{Cc}/gu, " ").replace(/(?![\u200C\u200D\u{E0020}-\u{E007F}])\p{Cf}/gu, "").trim().split(/\s+/).filter(Boolean).join(" ");
-  if (visibleLen(text) === 0) return "";
-  const clipped = visibleLen(text) > titleColumns ? `${truncateColumns(text, titleColumns - 1)}…` : text;
+  if (!config.showTitle) return "";
+  const clipped = sanitizePlainText(raw, titleColumns);
+  if (clipped === "") return "";
   return colorize(clipped, colorMuted, config.color);
 }
 
@@ -129,42 +118,69 @@ function renderCost(cost: Payload["cost"], config: Config): string {
   return colorize(`${cost?.estimated === true ? "~" : ""}${formatCost(usd)}`, colorCyan, config.color);
 }
 
+/**
+ * Pure status-line renderer. Reads only validated payload fields and static/CLI config.
+ */
 export function render(payload: Payload, opts: RenderOptions): string {
   const config = opts.config;
-  const width = (payload.terminal_width ?? 0) <= 0 ? 80 : payload.terminal_width!;
-  const modelDisplay = payload.model?.display_name || payload.model?.id || "Gemini";
-  const modelSegment = renderModelSegment(shortModelName(modelDisplay), payload.plan_tier ?? "", config) + renderMode(payload.cycle_mode, config);
+  const width =
+    typeof payload.terminal_width === "number" && Number.isFinite(payload.terminal_width) && payload.terminal_width > 0
+      ? Math.trunc(payload.terminal_width)
+      : 80;
+
+  const rawModel = payload.model?.display_name || payload.model?.id || "Gemini";
+  const modelDisplay = sanitizePlainText(rawModel, 64) || "Gemini";
+  const modelSegment =
+    renderModelSegment(shortModelName(modelDisplay), typeof payload.plan_tier === "string" ? payload.plan_tier : "", config) +
+    renderMode(payload.cycle_mode, config);
+
   const ctxPct = contextPercent(payload.context_window);
-  const stateLabel = state(payload.agent_state ?? "");
-  const quota = quotaInfo(opts.quota, modelDisplay, payload.quota, opts.now ?? new Date());
+  const stateLabel = state(sanitizePlainText(payload.agent_state ?? "", stateMaxColumns));
+  const branch = config.showGitBranch
+    ? sanitizePlainText(opts.gitBranch ?? payload.vcs?.branch ?? "", branchMaxColumns)
+    : "";
+  const now = opts.now ?? new Date();
+  const quota = normalizeQuota(payload.quota, modelDisplay, now, {
+    locale: config.locale,
+    timeZone: config.timeZone
+  });
+
   if (config.multiline) {
-    return renderMultiline(payload, config, width, modelSegment, ctxPct, quota, opts.gitBranch ?? "", stateLabel);
+    return renderMultiline(payload, config, width, modelSegment, ctxPct, quota, branch, stateLabel);
   }
-  return renderSingleLine(payload, config, width, modelSegment, ctxPct, quota, stateLabel);
+  return renderSingleLine(payload, config, width, modelSegment, ctxPct, quota, branch, stateLabel);
 }
 
-function renderMultiline(payload: Payload, config: Config, width: number, modelSegment: string, ctxPct: number, quota: QuotaDisplay, branch: string, stateLabel: string): string {
+function renderHeaderLine(
+  payload: Payload,
+  config: Config,
+  width: number,
+  modelSegment: string,
+  branch: string,
+  stateLabel: string
+): string {
+  const dirName = config.showCWD ? sanitizePlainText(baseName(payload.cwd), cwdMaxColumns) : "";
   const line1Parts = [colorize(modelSegment, colorBlue, config.color)];
-  if (config.showCWD && payload.cwd) {
-    line1Parts.push(colorize(withIcon(config, " ", "") + path.basename(payload.cwd), colorYellow, config.color));
+  if (dirName !== "") {
+    line1Parts.push(colorize(`${withIcon(config, " ", "")}${dirName}`, colorYellow, config.color));
   }
-  if (config.showGitBranch && branch !== "") {
+  if (branch !== "") {
     line1Parts.push(colorize(renderGitSegment(branch, config), colorMagenta, config.color));
   }
   const stateText = config.showAgentState ? colorize(stateLabel, stateColor(stateLabel), config.color) : "";
   const titleText = renderTitle(payload.conversation_title, config);
   const costText = renderCost(payload.cost, config);
-  // The title is the first thing given up, then cost, then the rest in their existing order.
+
+  // Drop title first, then cost, then dir, then branch, then state.
   let line1 = joinHeader(...line1Parts, titleText, stateText, costText);
-  line1Parts.push(stateText);
   if (visibleLen(line1) > width) {
-    line1 = joinHeader(...line1Parts, costText);
+    line1 = joinHeader(...line1Parts, stateText, costText);
   }
   if (visibleLen(line1) > width) {
-    line1 = joinHeader(...line1Parts);
+    line1 = joinHeader(...line1Parts, stateText);
   }
   if (visibleLen(line1) > width) {
-    const git = config.showGitBranch && branch !== "" ? colorize(renderGitSegment(branch, config), colorMagenta, config.color) : "";
+    const git = branch !== "" ? colorize(renderGitSegment(branch, config), colorMagenta, config.color) : "";
     line1 = joinHeader(colorize(modelSegment, colorBlue, config.color), git, stateText);
   }
   if (visibleLen(line1) > width) {
@@ -173,88 +189,268 @@ function renderMultiline(payload: Payload, config: Config, width: number, modelS
   if (visibleLen(line1) > width) {
     line1 = colorize(modelSegment, colorBlue, config.color);
   }
-  line1 = fit(line1, width);
+  return fit(line1, width);
+}
 
-  let ctx = "Context ";
-  if (config.showProgressBar) {
-    ctx += `${progressBar(ctxPct, 10, config.color)} `;
-  }
-  ctx += contextValue(config, payload.context_window, ctxPct);
+function renderMultiline(
+  payload: Payload,
+  config: Config,
+  width: number,
+  modelSegment: string,
+  ctxPct: number,
+  quota: NormalizedQuota,
+  branch: string,
+  stateLabel: string
+): string {
+  const line1 = renderHeaderLine(payload, config, width, modelSegment, branch, stateLabel);
 
-  let usage = "";
-  if (quota.hasQuota) {
-    usage = usageLabel(config, quota, true);
-    if (quota.windows.length <= 1 && quota.reset !== "") {
-      usage += resetSuffix(config, quota.reset);
-    }
+  if (quota.groups.length > 1 || quota.buckets.length > 1) {
+    const ctxLine = fitContextLine(payload.context_window, config, ctxPct, width);
+    const groupLabelWidth = Math.min(14, Math.max(...quota.groups.map(g => visibleLen(g.groupLabel))));
+    const quotaLines = renderUniformQuotaGroupLines(quota.groups, config, width, groupLabelWidth);
+    return [line1, ctxLine, ...quotaLines].join("\n");
   }
-  let line2 = joinHeader(ctx, usage);
-  if (visibleLen(line2) > width) {
-    let usageNoBar = "";
-    if (quota.hasQuota) {
-      usageNoBar = usageLabel(config, quota, false);
-      if (quota.windows.length <= 1 && quota.reset !== "") {
-        usageNoBar += resetSuffix(config, quota.reset);
-      }
-    }
-    line2 = joinHeader(`Context ${contextValue(config, payload.context_window, ctxPct)}`, usageNoBar);
-  }
-  if (visibleLen(line2) > width) {
-    let usageCompact = "";
-    if (quota.hasQuota) {
-      usageCompact = usageLabel(config, quota, false);
-      if (quota.windows.length <= 1 && quota.reset !== "") {
-        usageCompact += resetSuffix(config, quota.reset);
-      }
-    }
-    line2 = joinHeader(`Context ${formatInt(ctxPct)}%`, usageCompact);
-  }
-  if (visibleLen(line2) > width) {
-    let coreUsage = "";
-    if (quota.hasQuota) {
-      coreUsage = `Use ${usageValue(config, quota.usagePct)}`;
-    }
-    line2 = join(`Ctx ${formatInt(ctxPct)}%`, coreUsage);
-  }
-  if (visibleLen(line2) > width) {
-    line2 = `${formatInt(ctxPct)}%`;
-  }
-  line2 = fit(line2, width);
+
+  const line2 = fitSingleQuotaLine2(payload.context_window, config, ctxPct, quota, width);
   return `${line1}\n${line2}`;
 }
 
-function renderSingleLine(payload: Payload, config: Config, width: number, modelSegment: string, ctxPct: number, quota: QuotaDisplay, stateLabel: string): string {
+function fitContextLine(ctxWindow: Payload["context_window"], config: Config, ctxPct: number, width: number): string {
+  const candidates = [
+    `Context ${config.showProgressBar ? `${progressBar(ctxPct, 10, config.color)} ` : ""}${contextValue(config, ctxWindow, ctxPct)}`,
+    `Context ${contextValue(config, ctxWindow, ctxPct)}`,
+    `Ctx ${formatInt(ctxPct)}%`,
+    `${formatInt(ctxPct)}%`
+  ];
+  for (const candidate of candidates) {
+    if (visibleLen(candidate) <= width) return candidate;
+  }
+  return fit(`${formatInt(ctxPct)}%`, width);
+}
+
+function fitSingleQuotaLine2(
+  ctxWindow: Payload["context_window"],
+  config: Config,
+  ctxPct: number,
+  quota: NormalizedQuota,
+  width: number
+): string {
+  const ctxFull = `Context ${config.showProgressBar ? `${progressBar(ctxPct, 10, config.color)} ` : ""}${contextValue(config, ctxWindow, ctxPct)}`;
+  const ctxNoBar = `Context ${contextValue(config, ctxWindow, ctxPct)}`;
+  const ctxPctOnly = `Context ${formatInt(ctxPct)}%`;
+  const ctxTiny = `Ctx ${formatInt(ctxPct)}%`;
+
+  if (!quota.hasQuota || quota.buckets.length === 0) {
+    const naText = colorize("Quota N/A", colorMuted, config.color);
+    const candidates = [
+      joinHeader(ctxFull, naText),
+      joinHeader(ctxNoBar, naText),
+      joinHeader(ctxPctOnly, naText),
+      join(ctxTiny, "Quota N/A"),
+      join(ctxTiny, "Q N/A"),
+      `${formatInt(ctxPct)}%`
+    ];
+    for (const c of candidates) {
+      if (visibleLen(c) <= width) return c;
+    }
+    return fit(`${formatInt(ctxPct)}%`, width);
+  }
+
+  const bucket = quota.buckets[0];
+  const qFull = formatSingleBucket(bucket, config, { dateMode: "full", prefix: "Quota: " });
+  const qShortDate = formatSingleBucket(bucket, config, { dateMode: "short", prefix: "Quota: " });
+  const qCountdownOnly = formatSingleBucket(bucket, config, { dateMode: "none", prefix: "Quota: " });
+  const qPctOnly = `Quota: ${bucket.label}: ${quotaAmountText(bucket, config)}`;
+  const qCompact = `${bucket.label}: ${quotaAmountText(bucket, config)}`;
+  const qTiny = `${bucket.label}: ${quotaCompactPct(bucket, config)}`;
+
+  const candidates = [
+    joinHeader(ctxFull, qFull),
+    joinHeader(ctxNoBar, qFull),
+    joinHeader(ctxPctOnly, qFull),
+    joinHeader(ctxPctOnly, qShortDate),
+    joinHeader(ctxPctOnly, qCountdownOnly),
+    joinHeader(ctxTiny, qCountdownOnly),
+    join(ctxTiny, qPctOnly),
+    join(ctxTiny, qCompact),
+    join(ctxTiny, qTiny),
+    `${formatInt(ctxPct)}%`
+  ];
+  for (const c of candidates) {
+    if (visibleLen(c) <= width) return c;
+  }
+  return fit(`${formatInt(ctxPct)}%`, width);
+}
+
+interface GroupWindowFormatOptions {
+  includeLeftWord: boolean;
+  dateMode: "full" | "short" | "none" | "omit";
+  pastDueShort: boolean;
+}
+
+function formatGroupWindow(
+  win: NormalizedQuotaBucket,
+  config: Config,
+  opts: GroupWindowFormatOptions
+): string {
+  const labelPart = win.windowLabel !== "" ? `${win.windowLabel}: ` : "";
+  const pctPart =
+    config.usageValue === "percent"
+      ? `${formatInt(win.usedPct)}%${opts.includeLeftWord ? " used" : ""}`
+      : `${formatInt(win.remainingPct)}%${opts.includeLeftWord ? " left" : ""}`;
+
+  let resetPart = "";
+  if (opts.dateMode !== "omit") {
+    if (win.resetPastDue) {
+      resetPart = opts.pastDueShort ? " (Reset due)" : " (Reset due / awaiting update)";
+    } else if (win.resetAt !== null) {
+      if (opts.dateMode === "full") {
+        resetPart = ` (${win.countdownText}, ${win.absoluteText})`;
+      } else if (opts.dateMode === "short") {
+        resetPart = ` (${win.countdownText}, ${win.shortAbsoluteText})`;
+      } else {
+        resetPart = ` (${win.countdownText})`;
+      }
+    }
+  }
+  return `${labelPart}${pctPart}${resetPart}`;
+}
+
+interface GroupTierSpec {
+  padded: boolean;
+  sep: string;
+  opts: GroupWindowFormatOptions;
+}
+
+const groupTiers: GroupTierSpec[] = [
+  {
+    padded: true,
+    sep: " │ ",
+    opts: { includeLeftWord: true, dateMode: "full", pastDueShort: false }
+  },
+  {
+    padded: true,
+    sep: " │ ",
+    opts: { includeLeftWord: true, dateMode: "short", pastDueShort: false }
+  },
+  {
+    padded: true,
+    sep: " │ ",
+    opts: { includeLeftWord: false, dateMode: "short", pastDueShort: true }
+  },
+  {
+    padded: true,
+    sep: " │ ",
+    opts: { includeLeftWord: true, dateMode: "none", pastDueShort: true }
+  },
+  {
+    padded: false,
+    sep: " | ",
+    opts: { includeLeftWord: true, dateMode: "none", pastDueShort: true }
+  },
+  {
+    padded: false,
+    sep: " | ",
+    opts: { includeLeftWord: false, dateMode: "none", pastDueShort: true }
+  },
+  {
+    padded: false,
+    sep: " | ",
+    opts: { includeLeftWord: false, dateMode: "omit", pastDueShort: true }
+  }
+];
+
+function renderGroupLinesAtTier(
+  groups: NormalizedQuotaGroup[],
+  config: Config,
+  groupLabelWidth: number,
+  tier: GroupTierSpec
+): string[] {
+  if (tier.padded) {
+    const has5h = groups.some(g => g.windows.some(w => w.windowLabel === "5h"));
+    const hasSecondary = groups.some(g => g.windows.some(w => w.windowLabel !== "5h"));
+    if (has5h && hasSecondary) {
+      const rows = groups.map(group => {
+        const win5h = group.windows.find(w => w.windowLabel === "5h");
+        const otherWins = group.windows.filter(w => w.windowLabel !== "5h");
+        return {
+          group,
+          col5hText: win5h ? formatGroupWindow(win5h, config, tier.opts) : "",
+          otherTexts: otherWins.map(w => formatGroupWindow(w, config, tier.opts))
+        };
+      });
+      const col5hWidth = Math.max(0, ...rows.map(r => visibleLen(r.col5hText)));
+      if (col5hWidth > 0) {
+        return rows.map(row => {
+          const header = ` ${padRightColumns(row.group.groupLabel, groupLabelWidth)} │ `;
+          const col5hCell = padRightColumns(row.col5hText, col5hWidth);
+          return `${header}${col5hCell}${row.otherTexts.length > 0 ? tier.sep + row.otherTexts.join(tier.sep) : ""}`;
+        });
+      }
+    }
+  }
+  return groups.map(group => {
+    const header = tier.padded
+      ? ` ${padRightColumns(group.groupLabel, groupLabelWidth)} │ `
+      : `${group.groupLabel}: `;
+    const body = group.windows.map(win => formatGroupWindow(win, config, tier.opts)).join(tier.sep);
+    return `${header}${body}`;
+  });
+}
+
+function renderUniformQuotaGroupLines(
+  groups: NormalizedQuotaGroup[],
+  config: Config,
+  width: number,
+  groupLabelWidth: number
+): string[] {
+  for (const tier of groupTiers) {
+    const rendered = renderGroupLinesAtTier(groups, config, groupLabelWidth, tier);
+    if (rendered.every(line => visibleLen(line) <= width)) {
+      return rendered;
+    }
+  }
+  const fallbackTier = groupTiers[groupTiers.length - 1];
+  return renderGroupLinesAtTier(groups, config, groupLabelWidth, fallbackTier).map(line => fit(line, width));
+}
+
+function renderSingleLine(
+  payload: Payload,
+  config: Config,
+  width: number,
+  modelSegment: string,
+  ctxPct: number,
+  quota: NormalizedQuota,
+  branch: string,
+  stateLabel: string
+): string {
   const coloredBadge = colorize(modelSegment, colorBlue, config.color);
   const ctx = `Ctx ${contextValue(config, payload.context_window, ctxPct)}`;
-  let tokens = tokenDetail(payload.context_window);
-  if (tokens !== "" && config.contextValue === "percent") {
-    tokens = colorize(tokens, colorMuted, config.color);
-  } else {
-    tokens = "";
-  }
-  let usage = "";
-  if (quota.hasQuota) {
-    let text = usageLabel(config, quota, false);
-    if (quota.windows.length <= 1 && quota.reset !== "") {
-      text += resetSuffix(config, quota.reset);
-    }
-    usage = colorize(text, colorMuted, config.color);
-  }
+  const ctxSimple = `Ctx ${formatInt(ctxPct)}%`;
+  const tokens = config.contextValue === "percent" ? colorize(tokenDetail(payload.context_window), colorMuted, config.color) : "";
+  const bar = config.showProgressBar ? progressBar(ctxPct, 10, config.color) : "";
+  const branchText = branch !== "" ? colorize(renderGitSegment(branch, config), colorMagenta, config.color) : "";
   const stateText = config.showAgentState ? colorize(stateLabel, stateColor(stateLabel), config.color) : "";
   const costText = renderCost(payload.cost, config);
   const titleText = renderTitle(payload.conversation_title, config);
-  let bar = "";
-  if (config.showProgressBar) {
-    bar = progressBar(ctxPct, 10, config.color);
-  }
+
+  const qFull = singleLineQuotaText(quota, config, "full");
+  const qShort = singleLineQuotaText(quota, config, "short");
+  const qCountdown = singleLineQuotaText(quota, config, "none");
+  const qCompact = singleLineQuotaText(quota, config, "pct-only");
+
   const levels = [
-    [coloredBadge, ctx, tokens, bar, usage, titleText, stateText, costText],
-    [coloredBadge, ctx, tokens, bar, usage, stateText, costText],
-    [coloredBadge, ctx, tokens, bar, usage, stateText],
-    [coloredBadge, ctx, bar, usage, stateText],
-    [coloredBadge, ctx, usage, stateText],
-    [coloredBadge, ctx, stateText],
-    [ctx, stateText],
+    [coloredBadge, ctx, tokens, bar, qFull, branchText, titleText, stateText, costText],
+    [coloredBadge, ctx, tokens, bar, qFull, titleText, stateText, costText],
+    [coloredBadge, ctx, tokens, bar, qFull, stateText, costText],
+    [coloredBadge, ctx, bar, qFull, stateText],
+    [coloredBadge, ctx, qFull, stateText],
+    [coloredBadge, ctxSimple, qShort, stateText],
+    [coloredBadge, ctxSimple, qCountdown, stateText],
+    [coloredBadge, ctxSimple, qCompact, stateText],
+    [coloredBadge, ctxSimple, stateText],
+    [ctxSimple, qCompact, stateText],
+    [ctxSimple, stateText],
     [`${formatInt(ctxPct)}%`, stateLabel]
   ];
   for (const parts of levels) {
@@ -264,6 +460,88 @@ function renderSingleLine(payload: Payload, config: Config, width: number, model
     }
   }
   return fit(`${formatInt(ctxPct)}% ${stateLabel}`, width);
+}
+
+function singleLineQuotaText(
+  quota: NormalizedQuota,
+  config: Config,
+  mode: "full" | "short" | "none" | "pct-only"
+): string {
+  if (!quota.hasQuota || quota.buckets.length === 0) {
+    return colorize(mode === "pct-only" ? "Q N/A" : "Quota N/A", colorMuted, config.color);
+  }
+  if (quota.groups.length === 1 && quota.buckets.length === 1) {
+    const b = quota.buckets[0];
+    if (mode === "pct-only") return `Quota: ${b.label}: ${quotaAmountText(b, config)}`;
+    return formatSingleBucket(b, config, { dateMode: mode, prefix: "Quota: " });
+  }
+  if (mode === "pct-only") {
+    return `Quota ${quota.groups
+      .map(
+        g =>
+          `${g.groupLabel}: ${g.windows
+            .map(w => `${w.windowLabel ? `${w.windowLabel}: ` : ""}${quotaCompactPct(w, config)}`)
+            .join(" / ")}`
+      )
+      .join(" | ")}`;
+  }
+  return `Quota ${quota.groups
+    .map(g => {
+      const windows = g.windows
+        .map(w =>
+          formatGroupWindow(w, config, {
+            includeLeftWord: true,
+            dateMode: mode,
+            pastDueShort: true
+          })
+        )
+        .join(" / ");
+      return `${g.groupLabel}: ${windows}`;
+    })
+    .join(" | ")}`;
+}
+
+function formatSingleBucket(
+  bucket: NormalizedQuotaBucket,
+  config: Config,
+  opts: { dateMode: "full" | "short" | "none"; prefix: string }
+): string {
+  const amount = quotaAmountText(bucket, config);
+  const reset = formatBucketResetPart(bucket, opts.dateMode);
+  return `${opts.prefix}${bucket.label}: ${amount}${reset ? ` (${reset})` : ""}`;
+}
+
+function formatBucketResetPart(
+  bucket: NormalizedQuotaBucket,
+  dateMode: "full" | "short" | "none"
+): string {
+  if (bucket.resetPastDue) {
+    return dateMode === "short" ? "Reset due" : bucket.absoluteText;
+  }
+  if (bucket.resetAt === null) {
+    return "";
+  }
+  if (dateMode === "full") {
+    return `${bucket.countdownText}, ${bucket.absoluteText}`;
+  }
+  if (dateMode === "short") {
+    return `${bucket.countdownText}, ${bucket.shortAbsoluteText}`;
+  }
+  return bucket.countdownText;
+}
+
+function quotaAmountText(bucket: NormalizedQuotaBucket, config: Config): string {
+  if (config.usageValue === "percent") {
+    return `${formatInt(bucket.usedPct)}% used`;
+  }
+  return `${formatInt(bucket.remainingPct)}% left`;
+}
+
+function quotaCompactPct(bucket: NormalizedQuotaBucket, config: Config): string {
+  if (config.usageValue === "percent") {
+    return `${formatInt(bucket.usedPct)}% used`;
+  }
+  return `${formatInt(bucket.remainingPct)}%`;
 }
 
 function renderModelSegment(shortModel: string, rawPlan: string, config: Config): string {
@@ -279,17 +557,12 @@ function renderModelSegment(shortModel: string, rawPlan: string, config: Config)
   return `${withIcon(config, " ", "")}${plan}`;
 }
 
-// A Map, so a value such as "constructor" cannot resolve to an inherited property.
 const modeLabels = new Map<string, [string, string]>([
   ["plan", ["Plan", colorCyan]],
   ["accept-edits", ["Accept Edits", colorYellow]],
   ["auto", ["Auto", colorOrange]]
 ]);
 
-// The mode is a session setting like the model and plan, so it closes the model segment rather than
-// sitting beside the agent state, which changes every turn. It comes last in that segment, so its own
-// colour ends where the segment's blue would have ended anyway. An unknown mode still shows, but only
-// when it is a plain identifier: the value comes from the CLI and is never printed raw.
 function renderMode(raw: unknown, config: Config): string {
   if (!config.showMode || typeof raw !== "string") return "";
   const mode = raw.toLowerCase();
@@ -309,247 +582,11 @@ function renderPlan(plan: string, config: Config): string {
 }
 
 function renderGitSegment(branch: string, config: Config): string {
-  if (branch === "git") {
-    return `${withIcon(config, " ", "")}git`;
-  }
   return `${withIcon(config, " ", "")}${branch}`;
-}
-
-function resetSuffix(config: Config, reset: string): string {
-  return ` ${withIcon(config, "↻ ", "")}Reset ${reset}`;
-}
-
-function inlineResetSuffix(config: Config, reset: string): string {
-  if (reset === "") {
-    return "";
-  }
-  return ` (${withIcon(config, "↻ ", "")}${reset})`;
 }
 
 function withIcon(config: Config, icon: string, fallback: string): string {
   return config.showIcons ? icon : fallback;
-}
-
-function quotaInfo(cache: Cache | null | undefined, modelDisplay: string, officialQuota: Record<string, OfficialQuotaBucket> | undefined, now: Date): QuotaDisplay {
-  const cachedBuckets = liveCachedBuckets(cache, now);
-  if (cachedBuckets !== null) {
-    // Which buckets apply is the plan's call, and a payload carrying Gemini quota states it for this
-    // session; a cache read under another plan must not decide it. A payload without Gemini quota says
-    // nothing about Argon, so then the cache is all there is.
-    const merged = mergeQuotaBuckets(officialQuota ?? {}, cachedBuckets, now);
-    const plan = officialQuota && geminiPlanKeys.some(key => Object.prototype.hasOwnProperty.call(officialQuota, key)) ? officialQuota : merged;
-    const mergedInfo = officialQuotaInfo(merged, modelDisplay, plan);
-    if (mergedInfo !== null) {
-      return mergedInfo;
-    }
-  }
-  const cacheInfo = cacheQuotaInfo(cache, modelDisplay);
-  const official = officialQuotaInfo(officialQuota, modelDisplay);
-  if (official !== null) {
-    if (official.hasQuota && cacheInfo !== null && cacheInfo.hasQuota && cacheIsFresh(cache, now)) {
-      return mergeFreshCacheQuota(official, cacheInfo);
-    }
-    return official;
-  }
-  if (cacheInfo !== null) {
-    return cacheInfo;
-  }
-  return noQuota();
-}
-
-function cacheQuotaInfo(cache: Cache | null | undefined, modelDisplay: string): QuotaDisplay | null {
-  const [quota, ok] = matchModel(cache, modelDisplay);
-  if (!ok || quota === null) {
-    return null;
-  }
-  const usagePct = quotaUsagePercent(quota);
-  const reset = usagePct > 0 ? formatResetClock(quota.resetTime) : "";
-  return quotaDisplay([{ label: "", usagePct, reset }]);
-}
-
-// The buckets a `/usage` refresh cached, minus any whose window has already reset: such a reading
-// describes a window that no longer exists.
-function liveCachedBuckets(cache: Cache | null | undefined, now: Date): Record<string, OfficialQuotaBucket> | null {
-  if (!cache?.quota || typeof cache.quota !== "object") {
-    return null;
-  }
-  const live: Record<string, OfficialQuotaBucket> = {};
-  for (const [key, bucket] of Object.entries(cache.quota)) {
-    const reset = Date.parse(bucket?.reset_time ?? "");
-    if (!Number.isFinite(bucket?.remaining_fraction) || !Number.isFinite(reset) || reset <= now.getTime()) {
-      continue;
-    }
-    // A countdown from now, so a cached window reads like one straight from the payload.
-    live[key] = {
-      remaining_fraction: bucket.remaining_fraction,
-      reset_time: bucket.reset_time,
-      reset_in_seconds: Math.trunc((reset - now.getTime()) / 1000)
-    };
-  }
-  return Object.keys(live).length > 0 ? live : null;
-}
-
-// The payload carries no fetch time, so freshness is read off the quota itself. A bucket has at most
-// one live window: a payload reading whose window has already reset yields to the live cached one.
-// Two live readings are the same window, whatever their reset times say (an untouched bucket's
-// reset_time floats with the query time), and quota only goes down within a window, so the lower
-// remainder is the more recent reading. Cached readings of an ended window never get this far.
-function mergeQuotaBuckets(
-  official: Record<string, OfficialQuotaBucket>,
-  cached: Record<string, OfficialQuotaBucket>,
-  now: Date
-): Record<string, OfficialQuotaBucket> {
-  const merged: Record<string, OfficialQuotaBucket> = { ...official };
-  for (const [key, fromCache] of Object.entries(cached)) {
-    const fromPayload = Object.prototype.hasOwnProperty.call(official, key) ? official[key] : undefined;
-    if (!fromPayload || !Number.isFinite(fromPayload.remaining_fraction)) {
-      merged[key] = fromCache;
-      continue;
-    }
-    const payloadReset = Date.parse(fromPayload.reset_time ?? "");
-    const payloadEnded = Number.isFinite(payloadReset) && payloadReset <= now.getTime();
-    // On a tie the cached reading wins too: its countdown is computed from now, the payload's from
-    // whenever the CLI last fetched.
-    if (payloadEnded || (fromCache.remaining_fraction ?? 1) <= (fromPayload.remaining_fraction ?? 1)) {
-      merged[key] = fromCache;
-    }
-  }
-  return merged;
-}
-
-function cacheIsFresh(cache: Cache | null | undefined, now: Date): boolean {
-  if (!cache?.timestamp) {
-    return false;
-  }
-  const cacheTime = new Date(cache.timestamp);
-  if (Number.isNaN(cacheTime.getTime())) {
-    return false;
-  }
-  return now.getTime() - cacheTime.getTime() <= 5 * 60 * 1000;
-}
-
-// `plan` is the reading that decides which buckets apply to the model; it defaults to the buckets read.
-function officialQuotaInfo(
-  officialQuota: Record<string, OfficialQuotaBucket> | undefined,
-  modelDisplay: string,
-  plan: Record<string, OfficialQuotaBucket> | undefined = officialQuota
-): QuotaDisplay | null {
-  if (!officialQuota) {
-    return null;
-  }
-  const keys = officialQuotaKeys(modelDisplay, plan ?? officialQuota);
-  const buckets: QuotaWindowDisplay[] = [];
-  let sawKnownBucket = false;
-  for (const { key, label } of keys) {
-    if (!Object.prototype.hasOwnProperty.call(officialQuota, key)) {
-      continue;
-    }
-    sawKnownBucket = true;
-    const bucket = officialQuota[key];
-    if (Number.isFinite(bucket.remaining_fraction)) {
-      const usagePct = quotaUsagePercent({
-        remainingFraction: bucket.remaining_fraction ?? 1,
-        resetTime: bucket.reset_time ?? ""
-      });
-      const reset = usagePct > 0 ? formatOfficialReset(bucket) : "";
-      buckets.push({ label, usagePct, reset });
-    }
-  }
-  if (buckets.length === 0) {
-    return sawKnownBucket ? noQuota() : null;
-  }
-  return quotaDisplay(buckets);
-}
-
-function mergeFreshCacheQuota(official: QuotaDisplay, cache: QuotaDisplay): QuotaDisplay {
-  if (!cache.hasQuota || cache.windows.length === 0) {
-    return official;
-  }
-  const cacheWindow = cache.windows[0];
-  const windows = official.windows.map(window => {
-    if (window.label !== "5h") {
-      return window;
-    }
-    if (cacheWindow.usagePct <= window.usagePct) {
-      return window;
-    }
-    return { ...window, usagePct: cacheWindow.usagePct, reset: cacheWindow.reset };
-  });
-  const hasFiveHourWindow = windows.some(window => window.label === "5h");
-  if (!hasFiveHourWindow && cacheWindow.usagePct > official.usagePct) {
-    return cache;
-  }
-  return quotaDisplay(windows);
-}
-
-function quotaDisplay(windows: QuotaWindowDisplay[]): QuotaDisplay {
-  let selected = windows[0] ?? { label: "", usagePct: 0, reset: "" };
-  for (const window of windows.slice(1)) {
-    if (window.usagePct > selected.usagePct) {
-      selected = window;
-    }
-  }
-  return {
-    usagePct: selected.usagePct,
-    reset: selected.reset,
-    hasQuota: windows.length > 0,
-    windows
-  };
-}
-
-function noQuota(): QuotaDisplay {
-  return { usagePct: 0, reset: "", hasQuota: false, windows: [] };
-}
-
-// On a Pro plan, CLI 1.4.x's /usage lists Gemini 4 Argon as a group of its own with a weekly limit and
-// no 5-hour one, so neither Gemini bucket applies to it. Ultra plans count Argon against the Gemini
-// buckets and send no Argon bucket, which is why its absence falls through to them.
-const argonWeeklyKey = "gemini-argon-wtu-weekly";
-// The buckets whose presence tells which of the two a plan is.
-const geminiPlanKeys = ["gemini-5h", "gemini-weekly", argonWeeklyKey];
-
-function officialQuotaKeys(modelDisplay: string, quota: Record<string, OfficialQuotaBucket>): Array<{ key: string; label: string }> {
-  const normalized = modelDisplay.toLowerCase();
-  if (normalized.includes("claude") || normalized.includes("gpt") || normalized.includes("oss")) {
-    return [{ key: "3p-5h", label: "5h" }, { key: "3p-weekly", label: "W" }];
-  }
-  if (normalized.includes("argon") && Object.prototype.hasOwnProperty.call(quota, argonWeeklyKey)) {
-    return [{ key: argonWeeklyKey, label: "W" }];
-  }
-  return [{ key: "gemini-5h", label: "5h" }, { key: "gemini-weekly", label: "W" }];
-}
-
-function formatResetClock(reset: string): string {
-  if (reset === "") {
-    return "";
-  }
-  const target = new Date(reset.replace("Z", "+00:00"));
-  if (Number.isNaN(target.getTime())) {
-    return "";
-  }
-  return `${pad2(target.getHours())}:${pad2(target.getMinutes())}`;
-}
-
-function formatOfficialReset(bucket: OfficialQuotaBucket): string {
-  if (Number.isFinite(bucket.reset_in_seconds) && (bucket.reset_in_seconds ?? 0) > 0) {
-    return formatResetDuration(bucket.reset_in_seconds ?? 0);
-  }
-  return formatResetClock(bucket.reset_time ?? "");
-}
-
-function formatResetDuration(seconds: number): string {
-  let totalMinutes = Math.max(0, Math.trunc(seconds / 60));
-  const days = Math.trunc(totalMinutes / (24 * 60));
-  totalMinutes -= days * 24 * 60;
-  const hours = Math.trunc(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (days > 0) {
-    return `${formatInt(days)}d ${formatInt(hours)}h`;
-  }
-  if (hours > 0) {
-    return `${formatInt(hours)}h ${formatInt(minutes)}m`;
-  }
-  return `${formatInt(minutes)}m`;
 }
 
 function contextValue(config: Config, ctx: Payload["context_window"], pct: number): string {
@@ -583,48 +620,10 @@ function contextPercent(ctx: Payload["context_window"]): number {
   return clampInt(Math.trunc(upstream + 0.5));
 }
 
-function usageLabel(config: Config, quota: QuotaDisplay, withBar: boolean): string {
-  if (quota.windows.length > 1) {
-    return `Usage ${quota.windows.map(window => usageWindowLabel(config, window, withBar)).join(" |  ")}`;
-  }
-  let label = "Usage ";
-  if (withBar && config.showProgressBar) {
-    label += `${usageBar(config, quota.usagePct)} `;
-  }
-  return label + usageValue(config, quota.usagePct);
-}
-
-function usageWindowLabel(config: Config, window: QuotaWindowDisplay, withBar: boolean): string {
-  let label = "";
-  if (withBar && config.showProgressBar) {
-    label += `${usageBar(config, window.usagePct, 10)} `;
-  }
-  return label + usageWindowValue(config, window.usagePct) + inlineResetSuffix(config, window.reset);
-}
-
-function usageWindowValue(config: Config, usagePct: number): string {
-  if (config.usageValue === "remaining") {
-    return `${formatInt(100 - usagePct)}%`;
-  }
-  return `${formatInt(usagePct)}%`;
-}
-
-function usageValue(config: Config, usagePct: number): string {
-  if (config.usageValue === "remaining") {
-    return `${formatInt(100 - usagePct)}% left`;
-  }
-  return `${formatInt(usagePct)}%`;
-}
-
-function usageBar(config: Config, usagePct: number, width = 8): string {
-  const fillPct = config.usageValue === "remaining" ? 100 - usagePct : usagePct;
-  return progressBarWithColor(fillPct, usagePct, width, config.color);
-}
-
 function tokenDetail(ctx: Payload["context_window"]): string {
   const total = ctx?.total_input_tokens;
   const windowSize = ctx?.context_window_size ?? 0;
-  if (typeof total !== "number" || total <= 0 || windowSize <= 0) {
+  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0 || !Number.isFinite(windowSize) || windowSize <= 0) {
     return "";
   }
   return `(${formatTokens(total)}/${formatTokens(windowSize)})`;
@@ -716,6 +715,12 @@ function fit(input: string, width: number): string {
   return truncateColumns(input, width);
 }
 
+function padRightColumns(input: string, targetCols: number): string {
+  const len = visibleLen(input);
+  if (len >= targetCols) return input;
+  return `${input}${" ".repeat(targetCols - len)}`;
+}
+
 function clampInt(n: number): number {
   if (n < 0) return 0;
   if (n > 100) return 100;
@@ -724,13 +729,6 @@ function clampInt(n: number): number {
 
 function formatInt(n: number): string {
   return Math.trunc(n).toString(10);
-}
-
-function pad2(n: number): string {
-  if (n < 10) {
-    return `0${formatInt(n)}`;
-  }
-  return formatInt(n);
 }
 
 function title(raw: string): string {

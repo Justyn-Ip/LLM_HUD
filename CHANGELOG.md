@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-passive — 2026-11-18
+
+Forked from `https://github.com/franksde/agy-hud` @ `624e7183d2d84015ff3bef4a0c3e396cdb0e3283` (0.1.17).
+
+- **Strictly passive runtime:** Removed `src/quotaProbe.ts`, `src/usageCommand.ts`, `src/gitinfo.ts`, all `fs` cache/config/lock reads and writes, all loopback HTTP/HTTPS probing, and all `agy -p /usage` / `fc-list` / `agy plugin list` subprocess spawns.
+- **Bounded & validated stdin:** Enforced `1 MiB` stdin byte cap, configurable timeout (`--stdin-timeout-ms`), strict UTF-8 decoding, top-level plain JSON object check, and secret-free fallback (`agy-hud`).
+- **Quota & time formatting:** Validated `remaining_fraction` in `[0, 1]` (`100 * remaining_fraction`), grouped all valid buckets by model family (`Gemini`, `Argon`, `Claude/GPT`, plus any custom bucket groups) with `5h` and `Weekly` windows rendered uniformly horizontally without quota bars and with `Weekly:` aligned across groups (padding absent `5h` cells like `Argon` with spaces on padded tiers), rejected ambiguous local timestamps without timezone, added `Xd Yh Zm` / `<1m` countdown, used runtime OS locale/timezone via `Intl.DateTimeFormat(undefined, options).formatToParts`, marked `reset_in_seconds` fallback as `~ ... (estimated)`, rendered `Reset due / awaiting update` for past-due resets, and rendered `Quota N/A` when missing or malformed.
+- **Sanitization & Windows launcher:** Stripped ANSI/OSC/control/bidi sequences and enforced max column lengths across model, branch, bucket ID, cwd, and state fields; hardened `hooks/status-line.cmd` against `%CD%\node.exe` hijacking; added `scripts/audit.js` and `docs/SECURITY_REVIEW.md`, `docs/QUOTA_PAYLOAD_COMPATIBILITY.md`, `docs/WINDOWS_INSTALL_AND_ROLLBACK.md`.
+
 ## 0.1.17 — 2026-11-07
 
 - Quota refreshes no longer start agy's background updater, which on Windows briefly flashed a terminal window (#19). Once agy's last update check is 15 minutes old, the `agy -p /usage` run that a refresh starts spawns `agy --bg-updater`, which runs `agy --version`, and that grandchild showed a window that no option on the `/usage` run can hide. The run now gets `AGY_CLI_DISABLE_AUTO_UPDATE=true`, which agy checks before it considers updating. Only that run skips the check: your own `agy` sessions keep updating automatically, and `agy update` is unaffected. agy reads only `true`; on Antigravity CLI 1.5.3 a value of `1` still started the updater, so agy-hud sets `true` even when `1` is already in the environment.

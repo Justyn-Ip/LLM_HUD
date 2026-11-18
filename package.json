@@ -1,15 +1,19 @@
 {
   "name": "agy-hud",
-  "version": "0.1.17",
-  "description": "Compact Antigravity CLI status-line HUD",
+  "version": "0.2.0-passive",
+  "description": "Strictly passive Antigravity CLI status-line HUD",
   "license": "MIT",
   "bin": {
     "agy-hud": "dist/agy-hud.js"
   },
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/agy-hud.js \"--banner:js=#!/usr/bin/env node\"",
-    "build:test": "tsc -p tsconfig.json",
-    "test": "npm run build && npm run build:test && node --test build/test/*.test.js"
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/agy-hud.js \"--banner:js=#!/usr/bin/env node\" && esbuild codex/src/main.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/codex-hud.js \"--banner:js=#!/usr/bin/env node\"",
+    "build:test": "node -e \"require('node:fs').rmSync('build',{recursive:true,force:true});require('node:fs').rmSync('build-codex',{recursive:true,force:true})\" && tsc -p tsconfig.json && tsc -p codex/tsconfig.json",
+    "build:opencode-hud": "esbuild opencode-hud/quota.ts --bundle --platform=node --format=esm --outfile=opencode-hud/build/quota.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p codex/tsconfig.json --noEmit",
+    "lint": "node scripts/audit.js",
+    "test:opencode-hud": "npm run build:opencode-hud && node --test opencode-hud/test/quota.test.mjs",
+    "test": "npm run typecheck && npm run build && npm run build:test && npm run lint && npm run test:opencode-hud && node --test build/test/*.test.js && node --test build-codex/codex/test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.12.12",

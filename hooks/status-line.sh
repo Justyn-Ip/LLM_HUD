@@ -5,9 +5,7 @@ set -eu
 # redrawn often, and the PATH this hook is started with can be short of more
 # than node.
 
-# The `agy -p /usage` that a quota refresh starts sets AGY_HUD_NESTED=1 and
-# redraws its own status line several times. Print mode never shows it, so
-# drain the payload and leave without starting node.
+# If AGY_HUD_NESTED=1 is set by a caller, drain stdin and exit without starting Node.
 if [ "${AGY_HUD_NESTED:-}" = 1 ]; then
   # shellcheck disable=SC2034 # read only to consume stdin
   while IFS= read -r PAYLOAD_LINE; do :; done

@@ -1,10 +1,13 @@
 # Agent Instructions
 
-This repository is the TypeScript source for the `agy-hud` Antigravity CLI status-line plugin.
+This repository contains three HUD tools:
+
+- **`agy-hud` (`0.2.0-passive`)** (`src/`, `dist/agy-hud.js`, `hooks/`): Strictly passive Antigravity CLI status-line HUD plugin.
+- **`codex-hud` & Windows Desktop Widget** (`codex/`, `dist/codex-hud.js`): Codex CLI quota terminal companion and Windows desktop card widget.
+- **`opencode-hud`** (`opencode-hud/`): OpenCode TUI footer plugin for OpenCode Go/Zen quota and budget.
 
 ## Project Rules
 
-- Reply to the user in Chinese unless they explicitly ask otherwise.
 - Keep edits narrowly scoped to the requested change.
 - Do not commit local runtime data, probe output, caches, secrets, or agent scratch files.
 - Use `git pull --rebase` when synchronizing with a remote. Do not create merge commits.
@@ -171,7 +174,7 @@ Linux. Rules that are easy to break from macOS:
 - **`hooks/status-line.cmd` is CRLF.** `.gitattributes` checks it out that way on every platform,
   the Linux release runner included, and `test/hook.test.ts` fails if it is not. Edit it with an
   editor that keeps CRLF.
-- **Every file in `hooks/` must be in the release archive and in both READMEs' staging steps.**
+- **Every file in `hooks/` must be in the release archive and in `README.md` staging steps.**
   These lists are written by hand; `test/hook.test.ts` checks them.
 - **No bare program names in `status-line.cmd`.** cmd.exe searches the current directory, the
   user's workspace, before PATH. Find node with `%%~$PATH:`, which searches PATH alone (a `.` in PATH still counts), and name
@@ -193,6 +196,6 @@ Linux. Rules that are easy to break from macOS:
 ## Release And CI
 
 - CI expects `npm test` to pass.
-- Keep `README.md` and `README.zh-CN.md` in sync when user-facing behavior changes.
-- Keep `dist/agy-hud.js` in sync with TypeScript changes.
+- Keep `README.md` in sync when user-facing behavior changes.
+- Keep `dist/agy-hud.js` and `dist/codex-hud.js` in sync with TypeScript changes.
 - Do not edit files under `$HOME/.gemini/config/plugins/agy-hud` except as a local verification sync step. Those installed-plugin files are not the source of truth.

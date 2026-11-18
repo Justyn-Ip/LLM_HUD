@@ -1,4 +1,5 @@
-import fs from "node:fs";
+export type ContextDisplayMode = "percent" | "tokens" | "both";
+export type UsageDisplayMode = "remaining" | "percent";
 
 export interface Config {
   showModel: boolean;
@@ -12,11 +13,21 @@ export interface Config {
   showTitle: boolean;
   showMode: boolean;
   showIcons: boolean;
-  contextValue: string;
-  usageValue: string;
-  debug: boolean;
+  contextValue: ContextDisplayMode;
+  usageValue: UsageDisplayMode;
+  locale?: string;
+  timeZone?: string;
+  stdinTimeoutMs: number;
 }
 
+export const defaultStdinTimeoutMs = 1000;
+export const minStdinTimeoutMs = 50;
+export const maxStdinTimeoutMs = 10000;
+
+/**
+ * Static build-time defaults. The passive status-line runtime never reads
+ * configuration files or secret environment variables from disk/env.
+ */
 export function defaultConfig(): Config {
   return {
     showModel: true,
@@ -32,51 +43,83 @@ export function defaultConfig(): Config {
     showIcons: true,
     contextValue: "percent",
     usageValue: "remaining",
-    debug: false
+    locale: undefined,
+    timeZone: undefined,
+    stdinTimeoutMs: defaultStdinTimeoutMs
   };
 }
 
-export function loadFromPaths(paths: string[]): Config {
-  for (const configPath of paths) {
-    let raw: string;
-    try {
-      raw = fs.readFileSync(configPath, "utf8");
-    } catch {
-      continue;
-    }
-    return parseConfig(raw);
+function isValidLocale(value: string): boolean {
+  if (value === "" || value.length > 35 || !/^[A-Za-z0-9-]+$/.test(value)) {
+    return false;
   }
-  return defaultConfig();
-}
-
-export function parseConfig(raw: string): Config {
   try {
-    return merge(defaultConfig(), JSON.parse(stripBom(raw)));
+    new Intl.DateTimeFormat(value);
+    return true;
   } catch {
-    return defaultConfig();
+    return false;
   }
 }
 
-// Notepad and Windows PowerShell's Set-Content -Encoding utf8 start a UTF-8 file with a byte order
-// mark, which JSON.parse rejects.
-export function stripBom(text: string): string {
-  return text.startsWith("\uFEFF") ? text.slice(1) : text;
+function isValidTimeZone(value: string): boolean {
+  if (value === "" || value.length > 64 || !/^[A-Za-z0-9_/+.-]+$/.test(value)) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function merge(base: Config, patch: Record<string, unknown>): Config {
-  if (typeof patch.show_model === "boolean") base.showModel = patch.show_model;
-  if (typeof patch.show_progress_bar === "boolean") base.showProgressBar = patch.show_progress_bar;
-  if (typeof patch.multiline === "boolean") base.multiline = patch.multiline;
-  if (typeof patch.color === "boolean") base.color = patch.color;
-  if (typeof patch.show_git_branch === "boolean") base.showGitBranch = patch.show_git_branch;
-  if (typeof patch.show_cwd === "boolean") base.showCWD = patch.show_cwd;
-  if (typeof patch.show_agent_state === "boolean") base.showAgentState = patch.show_agent_state;
-  if (typeof patch.show_cost === "boolean") base.showCost = patch.show_cost;
-  if (typeof patch.show_title === "boolean") base.showTitle = patch.show_title;
-  if (typeof patch.show_mode === "boolean") base.showMode = patch.show_mode;
-  if (typeof patch.show_icons === "boolean") base.showIcons = patch.show_icons;
-  if (typeof patch.context_value === "string" && patch.context_value !== "") base.contextValue = patch.context_value;
-  if (typeof patch.usage_value === "string" && patch.usage_value !== "") base.usageValue = patch.usage_value;
-  if (typeof patch.debug === "boolean") base.debug = patch.debug;
-  return base;
+/**
+ * Parse safe, non-secret CLI flags into a static Config copy.
+ */
+export function parseCliConfig(args: string[], base: Config = defaultConfig()): { config: Config; error?: string } {
+  const cfg: Config = { ...base };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--color") cfg.color = true;
+    else if (arg === "--no-color") cfg.color = false;
+    else if (arg === "--icons") cfg.showIcons = true;
+    else if (arg === "--no-icons") cfg.showIcons = false;
+    else if (arg === "--bar") cfg.showProgressBar = true;
+    else if (arg === "--no-bar") cfg.showProgressBar = false;
+    else if (arg === "--multiline") cfg.multiline = true;
+    else if (arg === "--single-line") cfg.multiline = false;
+    else if (arg === "--no-git") cfg.showGitBranch = false;
+    else if (arg === "--no-cwd") cfg.showCWD = false;
+    else if (arg === "--no-state") cfg.showAgentState = false;
+    else if (arg === "--no-cost") cfg.showCost = false;
+    else if (arg === "--no-mode") cfg.showMode = false;
+    else if (arg === "--show-title") cfg.showTitle = true;
+    else if (arg === "--no-title") cfg.showTitle = false;
+    else if (arg.startsWith("--context-value=")) {
+      const v = arg.slice("--context-value=".length);
+      if (v === "percent" || v === "tokens" || v === "both") cfg.contextValue = v;
+      else return { config: cfg, error: "Invalid --context-value (expected percent, tokens, or both)." };
+    } else if (arg.startsWith("--usage-value=")) {
+      const v = arg.slice("--usage-value=".length);
+      if (v === "remaining" || v === "percent") cfg.usageValue = v;
+      else return { config: cfg, error: "Invalid --usage-value (expected remaining or percent)." };
+    } else if (arg.startsWith("--locale=")) {
+      const v = arg.slice("--locale=".length);
+      if (isValidLocale(v)) cfg.locale = v;
+      else return { config: cfg, error: "Invalid --locale value." };
+    } else if (arg.startsWith("--time-zone=")) {
+      const v = arg.slice("--time-zone=".length);
+      if (isValidTimeZone(v)) cfg.timeZone = v;
+      else return { config: cfg, error: "Invalid --time-zone value." };
+    } else if (arg.startsWith("--stdin-timeout-ms=")) {
+      const raw = Number(arg.slice("--stdin-timeout-ms=".length));
+      if (!Number.isInteger(raw) || raw < minStdinTimeoutMs || raw > maxStdinTimeoutMs) {
+        return { config: cfg, error: `Invalid --stdin-timeout-ms (expected integer ${minStdinTimeoutMs}..${maxStdinTimeoutMs}).` };
+      }
+      cfg.stdinTimeoutMs = raw;
+    } else {
+      return { config: cfg, error: "Unknown flag." };
+    }
+  }
+  return { config: cfg };
 }

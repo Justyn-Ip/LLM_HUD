@@ -1,11 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { defaultConfig, loadFromPaths, parseConfig } from "../src/config";
+import { defaultConfig, parseCliConfig } from "../src/config";
 
-test("default config matches open-source defaults", () => {
+test("default config uses static passive defaults and OS locale/timezone", () => {
   const got = defaultConfig();
   assert.equal(got.showModel, true);
   assert.equal(got.showProgressBar, true);
@@ -15,71 +12,48 @@ test("default config matches open-source defaults", () => {
   assert.equal(got.showCWD, true);
   assert.equal(got.showAgentState, true);
   assert.equal(got.showCost, true);
+  assert.equal(got.showTitle, false);
+  assert.equal(got.showMode, true);
   assert.equal(got.showIcons, true);
-  assert.equal(got.debug, false);
   assert.equal(got.contextValue, "percent");
   assert.equal(got.usageValue, "remaining");
+  assert.equal(got.locale, undefined);
+  assert.equal(got.timeZone, undefined);
+  assert.equal(got.stdinTimeoutMs, 1000);
 });
 
-test("load merges partial overrides", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hud-"));
-  const configPath = path.join(dir, "config.json");
-  fs.writeFileSync(configPath, `{"color":false,"multiline":false,"debug":true,"show_agent_state":false,"show_icons":false,"context_value":"both","usage_value":"percent"}`);
-
-  const got = loadFromPaths([configPath]);
-
-  assert.equal(got.color, false);
-  assert.equal(got.multiline, false);
-  assert.equal(got.debug, true);
-  assert.equal(got.showAgentState, false);
-  assert.equal(got.showIcons, false);
-  assert.equal(got.contextValue, "both");
-  assert.equal(got.usageValue, "percent");
-  assert.equal(got.showModel, true);
-  assert.equal(got.showProgressBar, true);
-  assert.equal(got.showGitBranch, true);
-  assert.equal(got.showCWD, true);
+test("parseCliConfig applies safe non-secret CLI flags", () => {
+  const res = parseCliConfig([
+    "--no-color",
+    "--no-icons",
+    "--single-line",
+    "--show-title",
+    "--no-cost",
+    "--context-value=both",
+    "--usage-value=percent",
+    "--locale=en-GB",
+    "--time-zone=Europe/London",
+    "--stdin-timeout-ms=500"
+  ]);
+  assert.equal(res.error, undefined);
+  assert.equal(res.config.color, false);
+  assert.equal(res.config.showIcons, false);
+  assert.equal(res.config.multiline, false);
+  assert.equal(res.config.showTitle, true);
+  assert.equal(res.config.showCost, false);
+  assert.equal(res.config.contextValue, "both");
+  assert.equal(res.config.usageValue, "percent");
+  assert.equal(res.config.locale, "en-GB");
+  assert.equal(res.config.timeZone, "Europe/London");
+  assert.equal(res.config.stdinTimeoutMs, 500);
 });
 
-test("load falls back on invalid JSON", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hud-"));
-  const configPath = path.join(dir, "config.json");
-  fs.writeFileSync(configPath, "not json");
-
-  assert.deepEqual(loadFromPaths([configPath]), defaultConfig());
-});
-
-test("show_cost false is honored from config JSON", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hud-"));
-  const configPath = path.join(dir, "config.json");
-  fs.writeFileSync(configPath, JSON.stringify({ show_cost: false }));
-  assert.equal(loadFromPaths([configPath]).showCost, false);
-});
-
-test("load uses first existing path", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hud-"));
-  const first = path.join(dir, "missing.json");
-  const second = path.join(dir, "config.json");
-  fs.writeFileSync(second, `{"show_cwd":false}`);
-
-  assert.equal(loadFromPaths([first, second]).showCWD, false);
-});
-
-test("show_title is off by default and honored from config JSON", () => {
-  assert.equal(defaultConfig().showTitle, false);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hud-"));
-  const configPath = path.join(dir, "config.json");
-  fs.writeFileSync(configPath, JSON.stringify({ show_title: true }));
-  assert.equal(loadFromPaths([configPath]).showTitle, true);
-});
-
-test("show_mode is on by default and honored from config JSON", () => {
-  assert.equal(defaultConfig().showMode, true);
-  assert.equal(parseConfig(JSON.stringify({ show_mode: false })).showMode, false);
-});
-
-// Notepad and Windows PowerShell's Set-Content -Encoding utf8 write a UTF-8 BOM. JSON.parse rejects
-// it, which used to drop the whole file silently and render with the defaults.
-test("a config file that starts with a UTF-8 byte order mark is still read", () => {
-  assert.equal(parseConfig("\uFEFF" + JSON.stringify({ show_icons: false })).showIcons, false);
+test("parseCliConfig rejects invalid flag values and unknown flags", () => {
+  assert.ok(parseCliConfig(["--context-value=bogus"]).error);
+  assert.ok(parseCliConfig(["--usage-value=bogus"]).error);
+  assert.ok(parseCliConfig(["--locale=invalid_locale!"]).error);
+  assert.ok(parseCliConfig(["--time-zone=Mars/Olympus_Mons"]).error);
+  assert.ok(parseCliConfig(["--stdin-timeout-ms=10"]).error);
+  assert.ok(parseCliConfig(["--stdin-timeout-ms=999999"]).error);
+  assert.ok(parseCliConfig(["--unknown-flag"]).error);
 });

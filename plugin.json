@@ -1,5 +1,5 @@
 {
   "name": "agy-hud",
-  "version": "0.1.17",
-  "description": "Compact Antigravity CLI status-line HUD"
+  "version": "0.2.0-passive",
+  "description": "Strictly passive Antigravity CLI status-line HUD"
 }
