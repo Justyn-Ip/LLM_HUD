@@ -64,6 +64,12 @@ public sealed class CodexWidgetForm : Form
     private bool isPinned;
     public readonly Label Recorded;
 
+    static CodexWidgetForm()
+    {
+        using (new Font("Segoe UI", 9f)) { }
+        SetProcessDPIAware();
+    }
+
     public CodexWidgetForm()
     {
         Text = "Codex quota";
@@ -293,6 +299,9 @@ public sealed class CodexWidgetForm : Form
 
     [DllImport("user32.dll")]
     private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
 
     public void RestoreLayout(string path)
     {
