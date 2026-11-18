@@ -244,7 +244,10 @@ public sealed class CodexWidgetForm : Form
     public static ContextMenuStrip CreateTrayMenu()
     {
         string baseFamily = ResolveBaseFontFamily();
-        return new ContextMenuStrip { Font = CreateFont(baseFamily, 14f, false) };
+        return new ContextMenuStrip {
+            Font = CreateFont(baseFamily, 9f, false),
+            ShowImageMargin = false
+        };
     }
 
     public static Icon CreateTrayIcon()
