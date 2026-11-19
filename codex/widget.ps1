@@ -223,7 +223,7 @@ $timer.Add_Tick({
     $updated.Text = "No recorded quota"
     if ($null -ne $snapshot.recordedAtMs) {
       $recorded = [DateTimeOffset]::FromUnixTimeMilliseconds($snapshot.recordedAtMs)
-      $updated.Text = "Updated " + $recorded.ToLocalTime().ToString("h:mm tt", [System.Globalization.CultureInfo]::InvariantCulture)
+      $updated.Text = "Updated: " + $recorded.ToLocalTime().ToString("dd-MMM-yyyy h:mm tt", [System.Globalization.CultureInfo]::InvariantCulture)
     }
   } catch {
     $form.SetQuota($unavailable, $null)
